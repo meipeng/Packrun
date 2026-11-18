@@ -1,0 +1,23 @@
+# frps：部署在公网跳板机
+# frps -c frps.toml
+
+bindPort = 7000
+
+# 管理面与代理端口只监听回环：
+# 18080 仅绑定 127.0.0.1，只允许同机 Nginx 反代访问，禁止对公网开放。
+# 若 Nginx 不在本机（需从其它主机访问 18080），必须用防火墙/安全组仅放行 Nginx 主机，
+# 并改为绑定内网地址，切勿直接暴露到公网。
+proxyBindAddr = "127.0.0.1"
+
+auth.method = "token"
+# 部署时必须替换为强随机值（例如 `openssl rand -hex 32`），并与 frpc 保持一致。
+auth.token = "replace-with-strong-token"
+
+# 关闭不需要的能力，减小暴露面
+allowPorts = [{ start = 18080, end = 18089 }]
+transport.maxPoolCount = 10
+transport.tcpMux = true
+
+log.to = "/var/log/frps.log"
+log.level = "info"
+log.maxDays = 7

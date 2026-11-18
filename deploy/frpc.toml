@@ -1,0 +1,22 @@
+# frpc：部署在中控机（与 Go 服务同机）
+# frpc -c frpc.toml
+
+serverAddr = "frp.example.com"
+serverPort = 7000
+
+auth.method = "token"
+# 必须与 frps 的 auth.token 一致，并替换为强随机值（例如 `openssl rand -hex 32`）。
+auth.token = "replace-with-strong-token"
+
+log.to = "/var/log/frpc.log"
+log.level = "info"
+log.maxDays = 7
+
+# 只映射中控服务的 HTTP 端口，不映射 SSH / 数据库等其它端口。
+# 中控服务应只监听 127.0.0.1:9000，公网流量统一由 frps 所在主机的 Nginx 终止 TLS。
+[[proxies]]
+name = "packrun-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 9000
+remotePort = 18080

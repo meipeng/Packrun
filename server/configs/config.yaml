@@ -1,0 +1,61 @@
+server:
+  # 默认监听所有网卡，可直接用 http://<主机IP>:9000/packrun/ 访问；请用防火墙/安全组限制来源。
+  # 由同机 Nginx / frp 反代时改为 127.0.0.1:9000，只暴露回环。
+  addr: "0.0.0.0:9000"
+  mode: debug
+  # 对外部署子路径，默认 "/packrun"；如需域名根路径改为 "/"。
+  # 需与启动脚本的 PACKRUN_BASE_PATH / Nginx location 保持一致，环境变量优先。
+  base_path: "/packrun"
+  allowed_origins:
+    - "http://localhost:5173"
+  # 仅信任本机回环代理写入的 X-Forwarded-For。
+  # 只有当 Nginx / frpc 与中控同机、且 18080 未对公网开放时，才可保留这两项；
+  # 否则应清空（[]），避免客户端伪造 X-Forwarded-For 绕过登录锁定与审计 IP 记录。
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "::1/128"
+
+auth:
+  # dev 占位值，仅用于本地 debug 启动。
+  # 非 debug 模式必须通过 PACKRUN_JWT_SECRET 提供 ≥32 字符的随机值，否则服务拒绝启动。
+  jwt_secret: "packrun-dev-secret-change-me"
+  token_ttl_minutes: 480
+  otp_issuer: "Packrun"
+  otp_period: 30
+  otp_skew: 1
+
+security:
+  # 「直接录入」凭据的加密主密钥短语（≥32 字符）：
+  # 服务器表单里直接填写的密码/私钥经 AES-256-GCM 加密后入库，主密钥本身不落库。
+  # 未配置（保持默认占位值）时启动不受影响，但「直接录入」功能不可用；
+  # 换主密钥后旧密文无法解密，需在服务器管理中重新录入凭据。
+  credential_key: "packrun-dev-credential-key-change-me"
+
+storage:
+  db_path: "./data/packrun.db"
+  package_dir: "./data/packages"
+  sandbox_root: "./data/sandbox"
+  # 包仓库总容量上限（MB），0 表示不限制。
+  max_total_mb: 20480
+
+deploy:
+  # ssh:   通过 SSH 推送至业务服务器（默认，生产用；主机指纹由「首次连接自动信任」登记）
+  # local: 本机沙箱模拟目标机（仅本地开发/演示用，包落在 data/sandbox/ 下，不连真实服务器）
+  mode: "ssh"
+  max_concurrent: 3
+  step_delay_ms: 350
+  # 单用户同时排队/执行中的任务上限，超出后拒绝创建。
+  max_pending_per_user: 10
+  # 后台指标采集间隔（秒）：定时通过 SSH 采集各服务器负载/内存/磁盘快照，
+  # 供「概览 / 服务器」页面展示；设为 0 关闭后台采集（手动「检测」仍可用）。默认 300。
+  metrics_interval_seconds: 300
+  # 主机指纹首次自动信任（TOFU）：目标机未登记指纹时，首次连接自动登记并写审计日志，
+  # 之后每次连接据此校验，指纹不匹配即拒绝（服务器重建后需在服务器管理中清除重新信任）。
+  # 设为 false 时未登记指纹的服务器回退中控机 ~/.ssh/known_hosts 校验（存量兼容）。
+  auto_trust_hostkey: true
+
+bootstrap:
+  # 首次启动自动创建的管理员，登录后请立即绑定动态口令并改密。
+  # 非 debug 模式必须通过 PACKRUN_ADMIN_PASSWORD 提供口令，且不得使用本默认值。
+  admin_username: "admin"
+  admin_password: "Admin@12345"

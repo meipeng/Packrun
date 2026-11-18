@@ -1,0 +1,96 @@
+# 公网入口：Nginx 终止 TLS，反代到 frps 暴露的本地端口
+# 放置位置：公网跳板机 /etc/nginx/conf.d/packrun.conf
+#
+# 安全前提：frps 的 proxyBindAddr 已固定为 127.0.0.1，18080 只监听回环，
+# 且只能由本机 Nginx 访问，严禁对公网开放（防火墙只放行 80/443）。
+
+# 本文件放在 /etc/nginx/conf.d/ 下，Nginx 默认会把 conf.d 内文件 include 到 http {} 中；
+# limit_req_zone 必须在 http 上下文，因此与 server 块写在同一文件。
+limit_req_zone $binary_remote_addr zone=packrun:10m rate=10r/s;
+# 登录接口独立限流：5 次/分钟，配合服务端 5 次失败锁定。
+limit_req_zone $binary_remote_addr zone=packrun_login:10m rate=5r/m;
+
+server {
+    listen 80;
+    server_name deploy.example.com;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name deploy.example.com;
+
+    # 不回显 Nginx 版本号
+    server_tokens off;
+
+    ssl_certificate     /etc/nginx/certs/deploy.example.com.pem;
+    ssl_certificate_key /etc/nginx/certs/deploy.example.com.key;
+
+    # TLS 加固：仅 1.2/1.3，优先使用现代套件
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    # HSTS：确认全站 HTTPS 后再启用；includeSubDomains 需确保所有子域均支持 HTTPS
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # 基础安全头
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+
+    # 前端 CSP：Element Plus 运行时注入 inline style，故 style-src 需保留 'unsafe-inline'
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
+
+    # 与服务端 maxPackageSize 保持一致（200MB）
+    client_max_body_size 200m;
+    client_body_timeout  600s;
+
+    # 通用限流；登录接口使用下方独立的 packrun_login 区域
+    limit_req zone=packrun burst=20 nodelay;
+
+    # 登录接口独立限流：burst=5 nodelay，避免暴力尝试
+    location = /packrun/api/v1/auth/login {
+        limit_req zone=packrun_login burst=5 nodelay;
+
+        proxy_pass http://127.0.0.1:18080;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        proxy_connect_timeout   10s;
+        proxy_send_timeout      60s;
+        proxy_read_timeout      60s;
+    }
+
+    location / {
+        # frps 为 frpc 分配的 remotePort；仅监听回环，由本机 Nginx 反代
+        proxy_pass http://127.0.0.1:18080;
+
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 大包上传：不缓冲、放宽超时
+        proxy_request_buffering off;
+        proxy_buffering         off;
+        proxy_connect_timeout   10s;
+        proxy_send_timeout      600s;
+        proxy_read_timeout      600s;
+    }
+
+    location = /healthz {
+        proxy_pass http://127.0.0.1:18080/healthz;
+        access_log off;
+    }
+}

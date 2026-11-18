@@ -1,0 +1,113 @@
+package main
+
+import (
+	"flag"
+	"log"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	"github.com/packrun/packrun/internal/api"
+	"github.com/packrun/packrun/internal/config"
+	"github.com/packrun/packrun/internal/deploy"
+	"github.com/packrun/packrun/internal/secret"
+	"github.com/packrun/packrun/internal/store"
+)
+
+func main() {
+	cfgPath := flag.String("config", "configs/config.yaml", "配置文件路径")
+	flag.Parse()
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("配置安全校验失败: %v", err)
+	}
+
+	db, err := store.Open(cfg)
+	if err != nil {
+		log.Fatalf("初始化存储失败: %v", err)
+	}
+	if err := store.Seed(db, cfg); err != nil {
+		log.Fatalf("初始化基础数据失败: %v", err)
+	}
+	if n := api.RecoverInterruptedTasks(db); n > 0 {
+		log.Printf("[recover] %d 个未完成任务已标记为中断失败", n)
+	}
+
+	delay := time.Duration(cfg.Deploy.StepDelayMS) * time.Millisecond
+	var executor deploy.Deployer
+	switch cfg.Deploy.Mode {
+	case "ssh":
+		executor = &deploy.SSHDeployer{
+			StepDelay: delay,
+			Insecure:  os.Getenv("PACKRUN_SSH_INSECURE") == "1",
+		}
+		log.Printf("执行器: SSH（业务服务器远程执行）")
+	case "local":
+		executor = &deploy.LocalDeployer{SandboxRoot: cfg.Storage.SandboxRoot, StepDelay: delay}
+		log.Printf("执行器: 本地沙箱 %s（脚本仅回显，不实际执行）", cfg.Storage.SandboxRoot)
+	default:
+		log.Fatalf("未知的 deploy.mode: %s", cfg.Deploy.Mode)
+	}
+
+	// 主机指纹 TOFU：首次连接自动登记（装配层负责落库与审计），仅 SSH 执行器有真实主机。
+	if sshExec, ok := executor.(*deploy.SSHDeployer); ok {
+		sshExec.AutoTrust = cfg.Deploy.AutoTrustHostKey
+		sshExec.OnTrust = api.TrustHostKeyFunc(db)
+		// 「直接录入」凭据解密：主密钥来自配置/环境变量，不落库。
+		sshExec.SecretOpener = func(cipherText string) (string, error) {
+			key, err := cfg.UsableCredentialKey()
+			if err != nil {
+				return "", err
+			}
+			return secret.Open(key, cipherText)
+		}
+		if cfg.Deploy.AutoTrustHostKey {
+			log.Printf("主机指纹: 首次连接自动信任（TOFU），服务器重建后请在服务器管理中清除指纹")
+		} else {
+			log.Printf("主机指纹: 未开启自动信任，未登记指纹的服务器回退中控机 known_hosts 校验")
+		}
+	}
+
+	// 「直接录入」凭据能力提示：未配置主密钥时功能不可用（使用时报错），启动不受影响。
+	if _, err := cfg.UsableCredentialKey(); err != nil {
+		log.Printf("[credential] %v（存量 env:/file: 引用不受影响）", err)
+	}
+
+	gin.SetMode(cfg.Server.Mode)
+	app := api.NewApp(cfg, db, executor)
+
+	// 后台指标采集：定时拉取各服务器负载/内存/磁盘快照，仅在 SSH 模式下开启。
+	if cfg.Deploy.Mode == "ssh" {
+		api.StartMetricWorker(app, time.Duration(cfg.Deploy.MetricsIntervalSec)*time.Second)
+	}
+	// 最近上传仅保留最近 3 天，启动即清理一次，此后每小时清理。
+	api.StartPackageRetentionWorker(app, time.Hour)
+
+	handler := http.Handler(api.NewRouter(app))
+	if cfg.Server.BasePath != "/" {
+		handler = api.WithBasePath(handler, cfg.Server.BasePath)
+	}
+
+	srv := &http.Server{
+		Addr:              cfg.Server.Addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		// 单包上限 200MB，公网/隧道上传耗时可能远超 1 分钟，读超时需覆盖完整请求体；
+		// 写超时比读超时更宽，避免上传刚结束、响应写入时刚好超时。
+		ReadTimeout:    10 * time.Minute,
+		WriteTimeout:   15 * time.Minute,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+
+	log.Printf("Packrun 中控服务启动于 %s，部署路径 %s", cfg.Server.Addr, cfg.Server.BasePath)
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("服务退出: %v", err)
+	}
+}
