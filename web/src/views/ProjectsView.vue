@@ -104,6 +104,23 @@ const rollbackDisabled = computed(() => {
 
 const memberNames = computed(() => (current.value?.members || []).map((m) => m.displayName || m.username))
 
+// 成员下拉选项：用户列表 + 当前项目成员兜底。
+// 用户列表可能尚未加载（例如打开设置过早），或成员被角色过滤；
+// 只依赖 users 会让 el-select 找不到匹配项，直接回显成 3、4、5 这样的原始 ID。
+const memberOptions = computed(() => {
+  const options = new Map<number, { id: number; label: string }>()
+  for (const u of users.value) {
+    if (u.role === 'admin') continue
+    options.set(u.id, { id: u.id, label: `${u.displayName || u.username}（${u.username}）` })
+  }
+  for (const m of current.value?.members || []) {
+    if (!options.has(m.id)) {
+      options.set(m.id, { id: m.id, label: `${m.displayName || m.username}（${m.username}）` })
+    }
+  }
+  return Array.from(options.values())
+})
+
 function fmtTime(iso: string) {
   if (!iso) return '—'
   return new Date(iso).toLocaleString('zh-CN', { hour12: false })
@@ -200,6 +217,15 @@ function selectProject(p: Project) {
   })
 }
 
+async function loadUsers() {
+  if (!isAdmin.value) return
+  try {
+    users.value = await userApi.list()
+  } catch {
+    /* 非管理员拉取用户列表会 403；管理员偶发失败时保留已有列表 */
+  }
+}
+
 onMounted(async () => {
   await loadProjects(false)
   try {
@@ -208,7 +234,7 @@ onMounted(async () => {
     servers.value = sv
     scripts.value = sc
     allDirs.value = await directoryApi.list()
-    if (isAdmin.value) users.value = await userApi.list()
+    await loadUsers()
   } catch {
     /* 非管理员拉取用户列表会 403，忽略 */
   }
@@ -245,6 +271,8 @@ async function saveCreate() {
 function openSettings() {
   const p = current.value
   if (!p) return
+  // 用户列表为空时补加载一次，避免成员下拉只显示原始 ID。
+  if (isAdmin.value && !users.value.length) void loadUsers()
   dialog.settingsForm = {
     directoryIds: p.dirs.map((d) => d.id),
     memberIds: p.members.map((m) => m.id),
@@ -819,7 +847,7 @@ const dirLabel = (d: Directory) => {
         </el-form-item>
         <el-form-item label="项目成员" v-if="isAdmin">
           <el-select v-model="dialog.settingsForm.memberIds" multiple filterable style="width: 100%" placeholder="授权后成员可见并可操作本项目">
-            <el-option v-for="u in users.filter((x) => x.role !== 'admin')" :key="u.id" :label="`${u.displayName || u.username}（${u.username}）`" :value="u.id" />
+            <el-option v-for="u in memberOptions" :key="u.id" :label="u.label" :value="u.id" />
           </el-select>
           <div class="form-tip">成员即子用户的可见范围：仅被授权的用户能在工作台看到该项目。</div>
         </el-form-item>
