@@ -237,13 +237,29 @@ func (a *App) deletePackage(c *gin.Context) {
 }
 
 func (a *App) listPackages(c *gin.Context) {
+	q := a.DB.Where("created_at >= ?", packageRetentionCutoff(time.Now()))
+	// 安装包按上传者隔离：发布者只看得到自己的包，避免包名与历史版本互相暴露；
+	// 管理员与审计员保留全局视野，便于排障与审计。
+	if u := currentUser(c); u != nil && u.Role != model.RoleAdmin && u.Role != model.RoleAuditor {
+		q = q.Where("uploader_id = ?", u.ID)
+	}
 	var list []model.Package
-	if err := a.DB.Where("created_at >= ?", packageRetentionCutoff(time.Now())).
-		Order("id desc").Limit(200).Find(&list).Error; err != nil {
+	if err := q.Order("id desc").Limit(200).Find(&list).Error; err != nil {
 		internal(c, "查询包列表失败")
 		return
 	}
 	ok(c, list)
+}
+
+// canUsePackage 判断用户能否使用指定安装包：管理员与审计员不受限，其余只能用自己的上传。
+func canUsePackage(u *model.User, pkg *model.Package) bool {
+	if u == nil || pkg == nil {
+		return false
+	}
+	if u.Role == model.RoleAdmin || u.Role == model.RoleAuditor {
+		return true
+	}
+	return pkg.UploaderID == u.ID
 }
 
 // packageRetentionCutoff 返回保留窗口起点：当天 0 点往前推 packageRetentionDays-1 天（含当天共 3 天）。

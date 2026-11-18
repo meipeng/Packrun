@@ -285,6 +285,12 @@ server:
     - ::1/128
 storage:
   max_total_mb: 20480   # 包仓库总容量上限
+  task_log_retention_days: 90  # 任务步骤日志正文保留天数，0 = 不清理
+alert:
+  webhook_url: ""       # 留空只写服务日志；填企业微信群机器人地址即可推送
+  format: wecom         # wecom | generic
+  disk_min_free_mb: 1024
+  cert_files: []        # 需要监控到期的证书
 deploy:
   mode: local           # local | ssh
   max_concurrent: 3     # 全局并发闸门
@@ -293,7 +299,16 @@ deploy:
 ```
 
 环境变量覆盖：`PACKRUN_ADDR`、`PACKRUN_JWT_SECRET`、`PACKRUN_DEPLOY_MODE`、
-`PACKRUN_ADMIN_PASSWORD`、`PACKRUN_MAX_CONCURRENT`。
+`PACKRUN_ADMIN_PASSWORD`、`PACKRUN_MAX_CONCURRENT`、`PACKRUN_ALERT_WEBHOOK`。
+
+## 探针与告警
+
+`GET /healthz` 是深检查：数据库连接与 `PRAGMA quick_check`、库目录可写、包目录可写与配额占用、
+磁盘剩余空间；任一硬性检查失败返回 **503 + `degraded`**，可直接挂给负载均衡。
+探针不鉴权，因此只返回可用性结论，不暴露运行模式与目录路径。
+
+后台每 `alert.check_interval_seconds` 秒巡检磁盘余量、包仓库配额、新出现的失败任务和证书到期，
+按 `alert.min_interval_seconds` 去重后推送；未配置 `webhook_url` 时只写 `[alert]` 前缀的服务日志。
 
 ## 生产前置
 
@@ -303,7 +318,7 @@ deploy:
    （该账号只在 `debug` 模式创建）。
 3. 确认 `server.trusted_proxies` 与实际代理拓扑一致：仅同机 Nginx / frpc 时保留
    回环地址，否则清空，避免伪造 `X-Forwarded-For`。
-4. 使用 Nginx / 负载均衡时：`client_max_body_size` 与服务端 200MB 上限保持一致，
+4. 使用 Nginx / 负载均衡时：`client_max_body_size 210m`（给 multipart 边界留余量），
    并启用 TLS 1.2/1.3、HSTS、CSP 与基础安全头；登录接口使用独立限流区域。
 5. 使用 frp 时只暴露必要端口，`proxyBindAddr` 保持回环，18080 只允许 Nginx 访问，
    管理面与 18080 均不得对公网开放。

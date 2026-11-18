@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -13,6 +14,7 @@ import (
 	"github.com/packrun/packrun/internal/api"
 	"github.com/packrun/packrun/internal/config"
 	"github.com/packrun/packrun/internal/deploy"
+	"github.com/packrun/packrun/internal/notify"
 	"github.com/packrun/packrun/internal/secret"
 	"github.com/packrun/packrun/internal/store"
 )
@@ -94,6 +96,14 @@ func main() {
 	}
 	// 最近上传仅保留最近 3 天，启动即清理一次，此后每小时清理。
 	api.StartPackageRetentionWorker(app, time.Hour)
+	// 任务步骤正文按保留天数清理，避免数据库随时间无限增长。
+	api.StartTaskLogRetentionWorker(app, cfg.Storage.TaskLogRetentionDays)
+	// 后台巡检：磁盘余量、包仓库配额、失败任务、证书到期，按需推送告警。
+	var notifier notify.Notifier = notify.Nop{}
+	if url := strings.TrimSpace(cfg.Alert.WebhookURL); url != "" {
+		notifier = notify.NewWebhook(url, cfg.Alert.Format, time.Duration(cfg.Alert.MinIntervalSec)*time.Second)
+	}
+	api.StartWatchdog(app, notifier, time.Duration(cfg.Alert.CheckIntervalSec)*time.Second)
 
 	handler := http.Handler(api.NewRouter(app))
 	if cfg.Server.BasePath != "/" {

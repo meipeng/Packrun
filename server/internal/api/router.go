@@ -2,7 +2,6 @@ package api
 
 import (
 	"log"
-	"net/http"
 
 	"github.com/gin-gonic/gin"
 
@@ -19,9 +18,7 @@ func NewRouter(app *App) *gin.Engine {
 	r.Use(gin.Logger(), gin.Recovery(), securityHeaders(), bodyLimit(), cors(app.Cfg.Server.AllowedOrigins))
 	r.MaxMultipartMemory = 32 << 20
 
-	r.GET("/healthz", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
-	})
+	r.GET("/healthz", app.healthz)
 
 	v1 := r.Group("/api/v1")
 	v1.POST("/auth/login", app.login)
@@ -89,6 +86,8 @@ func NewRouter(app *App) *gin.Engine {
 		admin.GET("/users", app.listUsers)
 		admin.POST("/users", app.createUser)
 		admin.PUT("/users/:id", app.updateUser)
+		admin.DELETE("/users/:id", app.deleteUser)
+		admin.POST("/users/:id/otp/reset", app.resetUserOTP)
 	}
 
 	// 审计：管理员与审计员

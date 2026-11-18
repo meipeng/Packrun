@@ -664,6 +664,10 @@ func (a *App) publishProject(c *gin.Context) {
 		badRequest(c, "安装包不存在")
 		return
 	}
+	if !canUsePackage(u, &pkg) {
+		forbidden(c, "只能使用自己上传的安装包")
+		return
+	}
 	// 确认包文件仍存在于仓库中
 	if _, err := os.Stat(filepath.Join(a.Cfg.Storage.PackageDir, pkg.StorageKey)); err != nil {
 		badRequest(c, "安装包文件已丢失，请重新上传")

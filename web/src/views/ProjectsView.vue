@@ -649,7 +649,7 @@ const dirLabel = (d: Directory) => {
           </el-upload>
 
           <div class="pkg-list" v-if="packages.length">
-            <div class="pkg-head">最近上传</div>
+            <div class="pkg-head">最近上传<span style="font-weight: 400; font-size: 11px; opacity: 0.65">（仅显示本人上传）</span></div>
             <template v-for="g in recentGroups" :key="g.key">
               <div class="pkg-day" v-if="!g.isToday">{{ g.key }}</div>
               <div

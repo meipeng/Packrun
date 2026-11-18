@@ -103,6 +103,10 @@ func (a *App) createTask(c *gin.Context) {
 		badRequest(c, "安装包不存在")
 		return
 	}
+	if !canUsePackage(u, &pkg) {
+		forbidden(c, "只能使用自己上传的安装包")
+		return
+	}
 
 	var preScript *model.Script
 	if req.PreScriptID != nil && *req.PreScriptID > 0 {
@@ -272,6 +276,7 @@ func (a *App) runTask(id uint) {
 
 	var mu sync.Mutex
 	var current *model.TaskStep
+	var currentLog *stepLog
 	seq := 1
 
 	hooks := deploy.Hooks{
@@ -285,15 +290,18 @@ func (a *App) runTask(id uint) {
 			step := model.TaskStep{TaskID: id, Seq: seq, Name: name, Status: "running", StartedAt: &ts}
 			a.DB.Create(&step)
 			current = &step
+			currentLog = &stepLog{}
 			seq++
 		},
 		OnLog: func(line string) {
 			mu.Lock()
 			defer mu.Unlock()
-			if current == nil {
+			if current == nil || currentLog == nil {
 				return
 			}
-			current.Output += line + "\n"
+			// 单步日志有界保留（头 8KB + 尾 24KB），超长输出不会把数据库撑爆。
+			currentLog.add(line)
+			current.Output = currentLog.String()
 			a.DB.Model(current).Update("output", current.Output)
 		},
 		OnStage: func(stage string, pct int) {
@@ -493,9 +501,9 @@ func (a *App) overview(c *gin.Context) {
 		metricByID[m.ServerID] = m
 	}
 	type serverMetricView struct {
-		ServerName string    `json:"serverName"`
-		Env        string    `json:"env"`
-		Status     string    `json:"status"`
+		ServerName string              `json:"serverName"`
+		Env        string              `json:"env"`
+		Status     string              `json:"status"`
 		Metric     *model.ServerMetric `json:"metric"`
 	}
 	serverMetrics := make([]serverMetricView, 0, len(scoped))

@@ -290,7 +290,7 @@ onMounted(loadBase)
           </el-alert>
 
           <div class="pkg-list" v-if="packages.length">
-            <div class="pkg-head">最近上传</div>
+            <div class="pkg-head">最近上传<span style="font-weight: 400; font-size: 11px; opacity: 0.65">（仅显示本人上传）</span></div>
             <div
               v-for="p in packages.slice(0, 8)"
               :key="p.id"

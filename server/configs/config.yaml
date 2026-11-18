@@ -37,6 +37,8 @@ storage:
   sandbox_root: "./data/sandbox"
   # 包仓库总容量上限（MB），0 表示不限制。
   max_total_mb: 20480
+  # 任务步骤日志正文保留天数：超期只清正文、保留步骤时间线；0 表示不清理。
+  task_log_retention_days: 90
 
 deploy:
   # ssh:   通过 SSH 推送至业务服务器（默认，生产用；主机指纹由「首次连接自动信任」登记）
@@ -59,3 +61,20 @@ bootstrap:
   # 非 debug 模式必须通过 PACKRUN_ADMIN_PASSWORD 提供口令，且不得使用本默认值。
   admin_username: "admin"
   admin_password: "Admin@12345"
+
+alert:
+  # 告警推送地址；留空则只写服务日志（[alert] 前缀），不推送外部渠道。
+  # 也可用环境变量 PACKRUN_ALERT_WEBHOOK 覆盖。
+  webhook_url: ""
+  # wecom：企业微信群机器人；generic：{"source","level","title","text"} 通用 JSON。
+  format: "wecom"
+  # 同类告警的去重窗口（秒），避免故障期间刷屏。
+  min_interval_seconds: 600
+  # 后台巡检间隔（秒），0 表示关闭巡检。
+  check_interval_seconds: 60
+  # 包目录所在磁盘剩余空间低于该值（MB）时告警；0 表示不检查。
+  disk_min_free_mb: 1024
+  # 需要监控到期的证书文件（PEM 全链），例如 Nginx 的 fullchain。
+  cert_files: []
+  # 证书剩余天数低于该值时告警；0 表示不检查。
+  cert_expire_days: 14

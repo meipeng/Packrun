@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	defaultJWTSecret     = "packrun-dev-secret-change-me"
-	defaultAdminPassword = "Admin@12345"
+	defaultJWTSecret       = "packrun-dev-secret-change-me"
+	defaultAdminPassword   = "Admin@12345"
 	minJWTSecretLength     = 32
 	defaultCredentialKey   = "packrun-dev-credential-key-change-me"
 	minCredentialKeyLength = 32
@@ -26,7 +26,25 @@ type Config struct {
 	Security  SecurityConfig  `yaml:"security"`
 	Storage   StorageConfig   `yaml:"storage"`
 	Deploy    DeployConfig    `yaml:"deploy"`
+	Alert     AlertConfig     `yaml:"alert"`
 	Bootstrap BootstrapConfig `yaml:"bootstrap"`
+}
+
+// AlertConfig 外部告警推送。webhook_url 为空时只写服务日志，不推送。
+type AlertConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+	// Format 决定推送体格式：wecom（企业微信群机器人）或 generic（{"text","level"} 通用 JSON）。
+	Format string `yaml:"format"`
+	// MinIntervalSec 同一类告警的去重窗口，避免故障期间刷屏。
+	MinIntervalSec int `yaml:"min_interval_seconds"`
+	// CheckIntervalSec 后台巡检间隔；0 表示关闭巡检。
+	CheckIntervalSec int `yaml:"check_interval_seconds"`
+	// DiskMinFreeMB 包目录所在磁盘剩余空间低于该值时告警。
+	DiskMinFreeMB int `yaml:"disk_min_free_mb"`
+	// CertFiles 需要监控到期的证书文件（PEM），例如 Nginx 的 fullchain。
+	CertFiles []string `yaml:"cert_files"`
+	// CertExpireDays 证书剩余天数低于该值时告警。
+	CertExpireDays int `yaml:"cert_expire_days"`
 }
 
 // SecurityConfig 凭据加密相关：主密钥不落库，仅来自配置/环境变量。
@@ -56,6 +74,8 @@ type StorageConfig struct {
 	PackageDir  string `yaml:"package_dir"`
 	SandboxRoot string `yaml:"sandbox_root"`
 	MaxTotalMB  int    `yaml:"max_total_mb"`
+	// TaskLogRetentionDays 任务步骤日志正文保留天数，超期只清正文保留步骤记录；0 表示不清理。
+	TaskLogRetentionDays int `yaml:"task_log_retention_days"`
 }
 
 type DeployConfig struct {
@@ -95,10 +115,11 @@ func defaults() *Config {
 			CredentialKey: defaultCredentialKey,
 		},
 		Storage: StorageConfig{
-			DBPath:      "./data/packrun.db",
-			PackageDir:  "./data/packages",
-			SandboxRoot: "./data/sandbox",
-			MaxTotalMB:  20480,
+			DBPath:               "./data/packrun.db",
+			PackageDir:           "./data/packages",
+			SandboxRoot:          "./data/sandbox",
+			MaxTotalMB:           20480,
+			TaskLogRetentionDays: 90,
 		},
 		Deploy: DeployConfig{
 			// 默认 ssh：无配置文件时也按真实远程部署处理，避免误把生产任务落进本机沙箱。
@@ -108,6 +129,13 @@ func defaults() *Config {
 			MaxPendingPerUser:  10,
 			MetricsIntervalSec: 300,
 			AutoTrustHostKey:   true,
+		},
+		Alert: AlertConfig{
+			Format:           "wecom",
+			MinIntervalSec:   600,
+			CheckIntervalSec: 60,
+			DiskMinFreeMB:    1024,
+			CertExpireDays:   14,
 		},
 		Bootstrap: BootstrapConfig{
 			AdminUsername: "admin",
@@ -151,6 +179,33 @@ func (c *Config) Validate() error {
 	// deploy.metrics_interval_seconds 为 0 表示关闭后台采集，负数视为非法。
 	if c.Deploy.MetricsIntervalSec < 0 {
 		return fmt.Errorf("deploy.metrics_interval_seconds 不能为负数：%d（0 表示关闭后台采集）", c.Deploy.MetricsIntervalSec)
+	}
+
+	switch c.Alert.Format {
+	case "", "wecom", "generic":
+		if c.Alert.Format == "" {
+			c.Alert.Format = "wecom"
+		}
+	default:
+		return fmt.Errorf("alert.format 非法：%q（仅支持 wecom、generic）", c.Alert.Format)
+	}
+	if c.Alert.CheckIntervalSec < 0 {
+		return fmt.Errorf("alert.check_interval_seconds 不能为负数：%d（0 表示关闭巡检）", c.Alert.CheckIntervalSec)
+	}
+	if c.Alert.MinIntervalSec < 0 {
+		return fmt.Errorf("alert.min_interval_seconds 不能为负数：%d", c.Alert.MinIntervalSec)
+	}
+	if c.Alert.DiskMinFreeMB < 0 {
+		return fmt.Errorf("alert.disk_min_free_mb 不能为负数：%d", c.Alert.DiskMinFreeMB)
+	}
+	if c.Alert.CertExpireDays < 0 {
+		return fmt.Errorf("alert.cert_expire_days 不能为负数：%d", c.Alert.CertExpireDays)
+	}
+	if strings.TrimSpace(c.Alert.WebhookURL) != "" && !isHTTPURL(c.Alert.WebhookURL) {
+		return fmt.Errorf("alert.webhook_url 必须是 http(s) 地址")
+	}
+	if c.Storage.TaskLogRetentionDays < 0 {
+		return fmt.Errorf("storage.task_log_retention_days 不能为负数：%d（0 表示不清理）", c.Storage.TaskLogRetentionDays)
 	}
 
 	// credential_key 显式配置时必须足够强；空值或默认占位值视为「未配置」，
@@ -215,6 +270,12 @@ func (c *Config) UsableCredentialKey() (string, error) {
 		return "", fmt.Errorf("非 debug 模式必须配置非默认的 credential_key（security.credential_key 或 PACKRUN_CREDENTIAL_KEY，≥%d 字符），才能使用「直接录入」凭据", minCredentialKeyLength)
 	}
 	return key, nil
+}
+
+// isHTTPURL 只接受 http/https 前缀，避免把 file:// 之类写进告警配置。
+func isHTTPURL(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://")
 }
 
 // normalizeBasePath 将部署子路径规范化为 /foo 形式（根路径为 /）。
@@ -285,5 +346,8 @@ func applyEnv(cfg *Config) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			cfg.Deploy.MaxConcurrent = n
 		}
+	}
+	if v := os.Getenv("PACKRUN_ALERT_WEBHOOK"); v != "" {
+		cfg.Alert.WebhookURL = v
 	}
 }
