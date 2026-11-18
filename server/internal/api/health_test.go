@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/packrun/packrun/internal/model"
 )
 
 // doHealth 直接请求 /healthz 并解析报告。
@@ -138,5 +140,62 @@ func TestCertExpiryRejectsInvalidFile(t *testing.T) {
 	}
 	if _, _, err := certExpiry(path); err == nil {
 		t.Fatalf("无效证书应报错")
+	}
+}
+
+func TestOverviewCarriesHealthAndDropsTaskStats(t *testing.T) {
+	app, router, db := newSecurityTestEnv(t)
+	admin := mustCreateRoleUser(t, db, "admin", model.RoleAdmin, "*", "active")
+	token := mustToken(t, app, admin)
+	app.Cfg.Storage.DBPath = filepath.Join(t.TempDir(), "packrun.db")
+
+	rec, resp := doJSON(t, router, http.MethodGet, "/api/v1/overview", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("概览接口失败: %d / %s", rec.Code, rec.Body.String())
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(resp.Data, &payload); err != nil {
+		t.Fatalf("解析概览响应失败: %v", err)
+	}
+	for _, gone := range []string{"taskToday", "taskFailed", "taskRunning", "recentTasks"} {
+		if _, ok := payload[gone]; ok {
+			t.Fatalf("概览响应不应再包含任务字段 %s", gone)
+		}
+	}
+	var rep healthReport
+	if err := json.Unmarshal(payload["health"], &rep); err != nil {
+		t.Fatalf("解析 health 字段失败: %v", err)
+	}
+	if rep.Status != "ok" || len(rep.Checks) == 0 {
+		t.Fatalf("health 字段不完整: %+v", rep)
+	}
+	if rep.Checks["packageDir"].Metrics == nil || rep.Checks["disk"].Metrics == nil {
+		t.Fatalf("包仓库与磁盘应带结构化指标: %+v", rep.Checks)
+	}
+}
+
+func TestHealthCachesWithinWindow(t *testing.T) {
+	app, router, _ := newSecurityTestEnv(t)
+	app.Cfg.Storage.DBPath = filepath.Join(t.TempDir(), "packrun.db")
+	app.healthCacheFor = time.Hour
+
+	if code, _ := doHealth(t, router); code != http.StatusOK {
+		t.Fatalf("首次检查应通过，实际 %d", code)
+	}
+	// 缓存窗口内即使目录变得不可写，也应复用上一次结果。
+	dir := app.Cfg.Storage.PackageDir
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("调整目录权限失败: %v", err)
+	}
+	defer func() { _ = os.Chmod(dir, 0o700) }()
+
+	if code, rep := doHealth(t, router); code != http.StatusOK || rep.Checks["packageDir"].Status != "ok" {
+		t.Fatalf("缓存窗口内应复用结果，实际 %d / %+v", code, rep.Checks["packageDir"])
+	}
+
+	// 关闭缓存后应重新检查并返回 503。
+	app.healthCacheFor = 0
+	if code, rep := doHealth(t, router); code != http.StatusServiceUnavailable {
+		t.Fatalf("关闭缓存后应重新检查，实际 %d / %+v", code, rep.Checks["packageDir"])
 	}
 }

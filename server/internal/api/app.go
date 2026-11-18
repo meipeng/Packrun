@@ -31,6 +31,12 @@ type App struct {
 
 	dirLocksMu sync.Mutex
 	dirLocks   map[uint]*sync.Mutex // 同一部署目录串行执行
+
+	// 健康检查结果缓存：探针与概览页轮询时避免反复做完整性检查。
+	healthMu       sync.Mutex
+	healthCache    healthReport
+	healthAt       time.Time
+	healthCacheFor time.Duration
 }
 
 func NewApp(cfg *config.Config, db *gorm.DB, d deploy.Deployer) *App {
@@ -46,6 +52,8 @@ func NewApp(cfg *config.Config, db *gorm.DB, d deploy.Deployer) *App {
 		trusted:  parseTrustedProxies(cfg.Server.TrustedProxies),
 		gates:    map[uint]chan struct{}{},
 		dirLocks: map[uint]*sync.Mutex{},
+
+		healthCacheFor: 5 * time.Second,
 	}
 }
 

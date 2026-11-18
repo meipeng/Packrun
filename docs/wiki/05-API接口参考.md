@@ -193,12 +193,22 @@
 {
   "serverTotal": 3,
   "serverOnline": 2,
-  "taskToday": 12,
-  "taskFailed": 1,
-  "taskRunning": 2,
   "packageTotal": 8,
-  "recentTasks": [ ... ],
   "deployMode": "ssh",
+  "health": {
+    "status": "ok",
+    "version": "v0.2.0",
+    "uptimeSec": 3600,
+    "time": "2026-11-18T20:30:00+08:00",
+    "checks": {
+      "database":   { "status": "ok", "latencyMs": 1 },
+      "packageDir": { "status": "ok", "detail": "已用 512 MB / 上限 20480 MB（2%）",
+                      "metrics": { "usedMB": 512, "maxMB": 20480, "pct": 2 } },
+      "disk":       { "status": "ok", "detail": "剩余 69142 MB / 共 233752 MB",
+                      "metrics": { "freeMB": 69142, "totalMB": 233752, "usedPct": 70 } },
+      "tasks":      { "status": "warn", "detail": "最近 1 小时 2 个任务失败" }
+    }
+  },
   "serverMetrics": [
     {
       "serverName": "app-prod-01",
@@ -216,7 +226,9 @@
 }
 ```
 
-所有统计均按当前用户的 `serverScope` 过滤；`packageTotal` 为全局包数量。
+服务器与指标按当前用户的 `serverScope` 过滤；`packageTotal` 为全局包数量。
+任务统计与最近任务列表已从该接口移除（任务页负责），`health` 复用 `/healthz` 的深检查结果，
+带 5 秒缓存，避免概览页轮询反复执行 `PRAGMA quick_check`。
 
 ## 5. 项目接口
 

@@ -474,19 +474,9 @@ func (a *App) cancelTask(c *gin.Context) {
 
 func (a *App) overview(c *gin.Context) {
 	u := currentUser(c)
-	var serverTotal, serverOnline, taskToday, taskFailed, taskRunning int64
+	var serverTotal, serverOnline int64
 	applyServerScope(a.DB.Model(&model.Server{}), u, "id").Count(&serverTotal)
 	applyServerScope(a.DB.Model(&model.Server{}).Where("status = ?", "online"), u, "id").Count(&serverOnline)
-
-	today := time.Now()
-	today = time.Date(today.Year(), today.Month(), today.Day(), 0, 0, 0, 0, today.Location())
-	applyServerScope(a.DB.Model(&model.Task{}).Where("created_at >= ?", today), u, "server_id").Count(&taskToday)
-	applyServerScope(a.DB.Model(&model.Task{}).Where("created_at >= ? AND status = ?", today, model.TaskFailed), u, "server_id").Count(&taskFailed)
-	applyServerScope(a.DB.Model(&model.Task{}).
-		Where("status IN ?", []string{model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting}), u, "server_id").Count(&taskRunning)
-
-	var recent []model.Task
-	applyServerScope(a.DB.Order("id desc"), u, "server_id").Limit(6).Find(&recent)
 
 	var pkgCount int64
 	a.DB.Model(&model.Package{}).Count(&pkgCount)
@@ -516,16 +506,14 @@ func (a *App) overview(c *gin.Context) {
 		serverMetrics = append(serverMetrics, view)
 	}
 
+	// 概览页以「中控机健康 + 服务器资源」为主，任务数据交给任务页，避免首页堆指标。
 	ok(c, gin.H{
 		"serverTotal":   serverTotal,
 		"serverOnline":  serverOnline,
-		"taskToday":     taskToday,
-		"taskFailed":    taskFailed,
-		"taskRunning":   taskRunning,
 		"packageTotal":  pkgCount,
-		"recentTasks":   recent,
 		"deployMode":    a.Cfg.Deploy.Mode,
 		"serverMetrics": serverMetrics,
+		"health":        a.buildHealth(),
 	})
 }
 

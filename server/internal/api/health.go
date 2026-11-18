@@ -23,10 +23,12 @@ var Version = "dev"
 var processStart = time.Now()
 
 // healthCheck 是单项检查结果：ok / warn 不会导致整体不可用，fail 会返回 503。
+// Detail 面向人读，Metrics 面向页面渲染（单位统一为 MB 或百分比），两者并存。
 type healthCheck struct {
-	Status    string `json:"status"`
-	Detail    string `json:"detail,omitempty"`
-	LatencyMS int64  `json:"latencyMs,omitempty"`
+	Status    string           `json:"status"`
+	Detail    string           `json:"detail,omitempty"`
+	LatencyMS int64            `json:"latencyMs,omitempty"`
+	Metrics   map[string]int64 `json:"metrics,omitempty"`
 }
 
 // healthReport 是对外暴露的探针结果：只保留可用性信息，
@@ -42,12 +44,26 @@ type healthReport struct {
 // healthz 深检查：不仅证明进程活着，还要证明数据库可用可写、包目录可写、磁盘尚有空间。
 // 任一硬性检查失败返回 503，便于负载均衡与监控直接判定不可用。
 func (a *App) healthz(c *gin.Context) {
-	report := a.buildHealthReport()
+	report := a.buildHealth()
 	status := http.StatusOK
 	if report.Status != "ok" {
 		status = http.StatusServiceUnavailable
 	}
 	c.JSON(status, report)
+}
+
+// buildHealth 带短缓存的健康检查：负载均衡与概览页可能几秒一次轮询，
+// 每次都跑 PRAGMA quick_check 与目录遍历代价过高，缓存窗口内直接复用上次结果。
+func (a *App) buildHealth() healthReport {
+	a.healthMu.Lock()
+	defer a.healthMu.Unlock()
+	if a.healthCacheFor > 0 && !a.healthAt.IsZero() && time.Since(a.healthAt) < a.healthCacheFor {
+		return a.healthCache
+	}
+	report := a.buildHealthReport()
+	a.healthCache = report
+	a.healthAt = time.Now()
+	return report
 }
 
 func (a *App) buildHealthReport() healthReport {
@@ -127,6 +143,11 @@ func (a *App) checkPackageDir() healthCheck {
 	if a.Cfg.Storage.MaxTotalMB > 0 {
 		pct := float64(used) * 100 / (float64(a.Cfg.Storage.MaxTotalMB) * 1024 * 1024)
 		ch.Detail = fmt.Sprintf("已用 %d MB / 上限 %d MB（%.0f%%）", usedMB, a.Cfg.Storage.MaxTotalMB, pct)
+		ch.Metrics = map[string]int64{
+			"usedMB": usedMB,
+			"maxMB":  int64(a.Cfg.Storage.MaxTotalMB),
+			"pct":    int64(pct + 0.5),
+		}
 		if pct >= 90 {
 			ch.Status = "warn"
 			ch.Detail += "，接近配额上限"
@@ -148,6 +169,10 @@ func (a *App) checkDisk() healthCheck {
 		return healthCheck{Status: "warn", Detail: "磁盘空间读取失败"}
 	}
 	ch := healthCheck{Status: "ok", Detail: fmt.Sprintf("剩余 %d MB / 共 %d MB", freeMB, totalMB)}
+	if totalMB > 0 {
+		usedPct := int64((float64(totalMB-freeMB)*100)/float64(totalMB) + 0.5)
+		ch.Metrics = map[string]int64{"freeMB": freeMB, "totalMB": totalMB, "usedPct": usedPct}
+	}
 	if min := a.Cfg.Alert.DiskMinFreeMB; min > 0 && freeMB < int64(min) {
 		ch.Status = "fail"
 		ch.Detail = fmt.Sprintf("剩余 %d MB，低于阈值 %d MB", freeMB, min)

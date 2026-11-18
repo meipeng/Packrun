@@ -179,16 +179,30 @@ export interface ServerMetricRow {
   metric: ServerMetric | null
 }
 
+/** 单项健康检查结果：ok / warn 不影响可用性，fail 会整体返回 503 */
+export interface HealthCheck {
+  status: 'ok' | 'warn' | 'fail'
+  detail?: string
+  latencyMs?: number
+  /** 结构化指标：包仓库为 usedMB/maxMB/pct，磁盘为 freeMB/totalMB/usedPct */
+  metrics?: Record<string, number>
+}
+
+export interface HealthReport {
+  status: 'ok' | 'degraded'
+  version: string
+  uptimeSec: number
+  time: string
+  checks: Record<string, HealthCheck>
+}
+
 export interface Overview {
   serverTotal: number
   serverOnline: number
-  taskToday: number
-  taskFailed: number
-  taskRunning: number
   packageTotal: number
-  recentTasks: Task[]
   deployMode: string
   serverMetrics: ServerMetricRow[]
+  health: HealthReport
 }
 
 // ---------- 工作项目 ----------
