@@ -35,5 +35,9 @@ profile.cov
 go.work
 go.work.sum
 
+# 文档需要入库（覆盖全局 gitignore 的 *.md 规则）
+!docs/**/*.md
+!docs/*.md
+
 # 本地环境变量（密钥等）
 .env
