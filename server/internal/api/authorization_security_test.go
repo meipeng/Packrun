@@ -465,3 +465,60 @@ func TestUploadValidZipSucceeds(t *testing.T) {
 		t.Fatalf("包文件权限 = %o，期望 600", perm)
 	}
 }
+
+func TestProjectOwnerCanSeeOwnProject(t *testing.T) {
+	app, router, db := newSecurityTestEnv(t)
+	owner := mustCreateRoleUser(t, db, "owner", model.RoleDeployer, "*", "active")
+	other := mustCreateRoleUser(t, db, "other", model.RoleDeployer, "*", "active")
+	token := mustToken(t, app, owner)
+
+	rec, body := doJSON(t, router, http.MethodPost, "/api/v1/projects", map[string]any{
+		"name": "我的项目", "code": "mine",
+	}, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("创建项目状态码 = %d，期望 200，响应 = %s", rec.Code, rec.Body.String())
+	}
+	var created ProjectView
+	if err := json.Unmarshal(body.Data, &created); err != nil {
+		t.Fatalf("解析创建结果失败: %v，数据 = %s", err, string(body.Data))
+	}
+	if created.ID == 0 {
+		t.Fatal("创建结果缺少项目 ID")
+	}
+	if len(created.Members) != 1 || created.Members[0].ID != owner.ID {
+		t.Fatalf("创建者应作为隐式成员回显，实际 %+v", created.Members)
+	}
+
+	// 列表：未写入 project_members 也应看到自己创建的项目。
+	rec, body = doJSON(t, router, http.MethodGet, "/api/v1/projects", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("项目列表状态码 = %d，期望 200", rec.Code)
+	}
+	var list []ProjectView
+	if err := json.Unmarshal(body.Data, &list); err != nil || len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("创建者项目列表不符: err=%v list=%+v", err, list)
+	}
+
+	// 详情与历史：Owner 直接可读。
+	path := fmt.Sprintf("/api/v1/projects/%d", created.ID)
+	if rec, _ := doJSON(t, router, http.MethodGet, path, nil, token); rec.Code != http.StatusOK {
+		t.Fatalf("创建者读取项目详情状态码 = %d，期望 200", rec.Code)
+	}
+	if rec, _ := doJSON(t, router, http.MethodGet, path+"/history", nil, token); rec.Code != http.StatusOK {
+		t.Fatalf("创建者读取项目历史状态码 = %d，期望 200", rec.Code)
+	}
+
+	// 未被授权的其他发布者仍然不可见。
+	otherToken := mustToken(t, app, other)
+	if rec, _ := doJSON(t, router, http.MethodGet, path, nil, otherToken); rec.Code != http.StatusForbidden {
+		t.Fatalf("未授权用户读取详情状态码 = %d，期望 403", rec.Code)
+	}
+	rec, body = doJSON(t, router, http.MethodGet, "/api/v1/projects", nil, otherToken)
+	var otherList []ProjectView
+	if err := json.Unmarshal(body.Data, &otherList); err != nil {
+		t.Fatalf("解析其他用户项目列表失败: %v", err)
+	}
+	if len(otherList) != 0 {
+		t.Fatalf("未授权用户不应看到项目，实际 %+v", otherList)
+	}
+}

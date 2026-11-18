@@ -69,12 +69,17 @@ type HistoryItem struct {
 
 // ---------- 访问控制 ----------
 
-// canReadProject 管理员或项目成员可读。
+// canReadProject 管理员、项目 Owner 或项目成员可读。
+// Owner 即使没有 project_members 记录也始终可读，避免「自己建的项目看不到」。
 func (a *App) canReadProject(u *model.User, projectID uint) bool {
 	if u == nil {
 		return false
 	}
-	if u.Role == model.RoleAdmin {
+	var p model.Project
+	if err := a.DB.Select("id", "owner_id").First(&p, projectID).Error; err != nil {
+		return false
+	}
+	if u.Role == model.RoleAdmin || p.OwnerID == u.ID {
 		return true
 	}
 	var n int64
@@ -113,12 +118,27 @@ func (a *App) loadProjectDirs(projectID uint) ([]ProjectDirView, error) {
 }
 
 // loadProjectMembers 读取项目成员。
+// 非管理员 Owner 作为隐式成员展示，不要求 project_members 里有记录。
 func (a *App) loadProjectMembers(projectID uint) []ProjectMemberView {
+	var p model.Project
+	_ = a.DB.Select("id", "owner_id").First(&p, projectID).Error
+
 	var userIDs []uint
 	a.DB.Model(&model.ProjectMember{}).Where("project_id = ?", projectID).
 		Order("user_id asc").Pluck("user_id", &userIDs)
-	views := make([]ProjectMemberView, 0, len(userIDs))
+	views := make([]ProjectMemberView, 0, len(userIDs)+1)
+	if p.OwnerID != 0 {
+		var owner model.User
+		if err := a.DB.Select("id", "username", "display_name", "role").First(&owner, p.OwnerID).Error; err == nil && owner.Role != model.RoleAdmin {
+			views = append(views, ProjectMemberView{
+				ID: owner.ID, Username: owner.Username, DisplayName: owner.DisplayName, Role: owner.Role,
+			})
+		}
+	}
 	for _, id := range userIDs {
+		if id == p.OwnerID {
+			continue // Owner 已在上面展示，避免重复
+		}
 		var u model.User
 		if err := a.DB.First(&u, id).Error; err != nil {
 			continue
@@ -159,10 +179,11 @@ func (a *App) listProjects(c *gin.Context) {
 		var ids []uint
 		a.DB.Model(&model.ProjectMember{}).Where("user_id = ?", u.ID).Pluck("project_id", &ids)
 		if len(ids) == 0 {
-			ok(c, []ProjectView{})
-			return
+			q = q.Where("owner_id = ?", u.ID)
+		} else {
+			// Owner 即使没有成员记录也应看到自己创建的项目。
+			q = q.Where("owner_id = ? OR id IN ?", u.ID, ids)
 		}
-		q = q.Where("id IN ?", ids)
 	}
 	var list []model.Project
 	if err := q.Order("id asc").Find(&list).Error; err != nil {
