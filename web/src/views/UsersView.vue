@@ -51,19 +51,23 @@ function projectChips(row: User) {
   return userProjects.value[row.id] || []
 }
 
+async function loadProjects() {
+  try {
+    projects.value = await projectApi.list()
+    projectsReady.value = true
+  } catch {
+    projects.value = []
+    projectsReady.value = false
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     const [u, s] = await Promise.all([userApi.list(), serverApi.list()])
     list.value = u
     servers.value = s
-    try {
-      projects.value = await projectApi.list()
-      projectsReady.value = true
-    } catch {
-      projects.value = []
-      projectsReady.value = false
-    }
+    await loadProjects()
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
@@ -86,7 +90,9 @@ function openCreate() {
   dialog.visible = true
 }
 
-function openEdit(row: User) {
+async function openEdit(row: User) {
+  // 项目列表尚未加载时先补齐，否则会把已授权项目算成空，弹窗打开后也不会再回显。
+  if (!projectsReady.value) await loadProjects()
   dialog.form = {
     id: row.id,
     username: row.username,
@@ -122,7 +128,8 @@ async function save() {
     }
     ElMessage.success('已保存')
     dialog.visible = false
-    load()
+    // 等授权关系重新拉取完成再结束，避免表格和下次编辑读到旧数据。
+    await load()
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
