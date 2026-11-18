@@ -741,7 +741,7 @@ func (a *App) rollbackProject(c *gin.Context) {
 	}
 	var pkg model.Package
 	if err := a.DB.First(&pkg, source.PackageID).Error; err != nil {
-		badRequest(c, "该批次的安装包记录已不存在")
+		badRequest(c, "该批次的安装包已被回收（超出保留版本数），无法回滚")
 		return
 	}
 	if _, err := os.Stat(filepath.Join(a.Cfg.Storage.PackageDir, pkg.StorageKey)); err != nil {

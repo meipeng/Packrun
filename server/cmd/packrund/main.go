@@ -24,6 +24,10 @@ func main() {
 		runBackup(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "gc" {
+		runGC(os.Args[2:])
+		return
+	}
 
 	cfgPath := flag.String("config", "configs/config.yaml", "配置文件路径")
 	flag.Parse()
@@ -94,8 +98,9 @@ func main() {
 	if cfg.Deploy.Mode == "ssh" {
 		api.StartMetricWorker(app, time.Duration(cfg.Deploy.MetricsIntervalSec)*time.Second)
 	}
-	// 最近上传仅保留最近 3 天，启动即清理一次，此后每小时清理。
-	api.StartPackageRetentionWorker(app, time.Hour)
+	// 仓库与历史数据维护：上传回收、残留临时文件、任务日志、任务与审计留存，
+	// 其中包仓库版本回收每天执行一次。
+	api.StartMaintenanceWorker(app, time.Hour)
 	// 任务步骤正文按保留天数清理，避免数据库随时间无限增长。
 	api.StartTaskLogRetentionWorker(app, cfg.Storage.TaskLogRetentionDays)
 	// 后台巡检：磁盘余量、包仓库配额、失败任务、证书到期，按需推送告警。
@@ -155,4 +160,52 @@ func runBackup(args []string) {
 		log.Fatalf("备份失败: %v", err)
 	}
 	fmt.Printf("备份完成: %s\n", dest)
+}
+
+// runGC 回收包仓库中的历史安装包。默认 dry-run：先看清单，确认后再加 -apply。
+// 复用 OpenForBackup 打开数据库：不执行 AutoMigrate，避免维护命令顺手改线上表结构。
+func runGC(args []string) {
+	fs := flag.NewFlagSet("packrund gc", flag.ExitOnError)
+	cfgPath := fs.String("config", "configs/config.yaml", "配置文件路径")
+	apply := fs.Bool("apply", false, "真正删除文件与记录（默认只打印清单）")
+	keep := fs.Int("keep", -1, "每个目录保留最近 N 个版本的包，-1 表示使用配置值")
+	keepDays := fs.Int("keep-days", -1, "最近 N 天上传的包一律保留，-1 表示使用配置值")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+	if *keep < 0 {
+		*keep = cfg.Storage.PackageKeepReleases
+	}
+	if *keepDays < 0 {
+		*keepDays = cfg.Storage.PackageKeepDays
+	}
+	db, err := store.OpenForBackup(cfg)
+	if err != nil {
+		log.Fatalf("打开数据库失败: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("获取数据库连接失败: %v", err)
+	}
+	defer sqlDB.Close()
+
+	dryRun := !*apply
+	if dryRun {
+		fmt.Println("dry-run 模式：只打印将回收的包，加 -apply 才会真正删除")
+	}
+	removed, freed, failed, err := api.RunPackageGC(db, cfg.Storage.PackageDir, *keep, *keepDays, dryRun)
+	if err != nil {
+		log.Fatalf("包仓库回收失败: %v", err)
+	}
+	action := "回收"
+	if dryRun {
+		action = "将回收"
+	}
+	fmt.Printf("%s %d 个安装包，释放 %d MB（失败 %d 个）\n", action, removed, freed>>20, failed)
+	if dryRun && removed > 0 {
+		fmt.Println("确认无误后执行：packrund gc -apply")
+	}
 }

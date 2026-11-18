@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -267,66 +266,6 @@ func packageRetentionCutoff(now time.Time) time.Time {
 	y, m, d := now.Date()
 	start := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
 	return start.AddDate(0, 0, -(packageRetentionDays - 1))
-}
-
-// purgeExpiredPackages 清理超过保留期的上传记录及其仓库文件；
-// 仍被发布/回滚任务引用的包保留，避免历史批次无法回滚。
-func purgeExpiredPackages(app *App) {
-	var expired []model.Package
-	if err := app.DB.Where("created_at < ?", packageRetentionCutoff(time.Now())).Find(&expired).Error; err != nil {
-		log.Printf("[packages] 查询过期上传记录失败: %v", err)
-		return
-	}
-	removed := 0
-	for _, pkg := range expired {
-		var used int64
-		if err := app.DB.Model(&model.Task{}).Where("package_id = ?", pkg.ID).Count(&used).Error; err != nil {
-			log.Printf("[packages] 检查包引用失败 id=%d: %v", pkg.ID, err)
-			continue
-		}
-		if used > 0 {
-			continue
-		}
-		if pkg.StorageKey != "" {
-			if err := os.Remove(filepath.Join(app.Cfg.Storage.PackageDir, pkg.StorageKey)); err != nil && !os.IsNotExist(err) {
-				log.Printf("[packages] 删除过期包文件失败 id=%d: %v", pkg.ID, err)
-				continue
-			}
-		}
-		if err := app.DB.Delete(&pkg).Error; err != nil {
-			log.Printf("[packages] 删除过期包记录失败 id=%d: %v", pkg.ID, err)
-			continue
-		}
-		removed++
-	}
-	if removed > 0 {
-		log.Printf("[packages] 已清理 %d 个超过 %d 天的上传包", removed, packageRetentionDays)
-	}
-}
-
-// StartPackageRetentionWorker 启动后立即清理一次，之后按 interval 周期清理过期上传记录。
-func StartPackageRetentionWorker(app *App, interval time.Duration) {
-	if interval <= 0 {
-		return
-	}
-	go func() {
-		log.Printf("[packages] 上传记录保留 %d 天，超期自动清理已启动", packageRetentionDays)
-		maintainPackageStore(app)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for range ticker.C {
-			maintainPackageStore(app)
-		}
-	}()
-}
-
-// maintainPackageStore 执行一次仓库维护：清理过期上传记录，顺带回收异常退出残留的临时文件。
-func maintainPackageStore(app *App) {
-	purgeExpiredPackages(app)
-	// 一小时以内的临时文件可能属于正在进行的上传，不动。
-	if n := sweepStaleUploads(app.Cfg.Storage.PackageDir, time.Hour); n > 0 {
-		log.Printf("[packages] 已清理 %d 个残留的上传临时文件", n)
-	}
 }
 
 func randomHex(n int) string {

@@ -76,6 +76,14 @@ type StorageConfig struct {
 	MaxTotalMB  int    `yaml:"max_total_mb"`
 	// TaskLogRetentionDays 任务步骤日志正文保留天数，超期只清正文保留步骤记录；0 表示不清理。
 	TaskLogRetentionDays int `yaml:"task_log_retention_days"`
+	// TaskRetentionDays 终态任务（成功/失败/取消）保留天数，超期连同步骤一起删除；0 表示不清理。
+	TaskRetentionDays int `yaml:"task_retention_days"`
+	// AuditRetentionDays 审计日志保留天数；0 表示不清理。合规要求更久时请先导出再调大。
+	AuditRetentionDays int `yaml:"audit_retention_days"`
+	// PackageKeepReleases 每个部署目录保留最近多少个版本的安装包，保证最近 N 次回滚可用；0 表示不做版本回收。
+	PackageKeepReleases int `yaml:"package_keep_releases"`
+	// PackageKeepDays 最近多少天内上传的安装包一律保留（可能刚发还没验证完）；0 表示只按版本窗口判断。
+	PackageKeepDays int `yaml:"package_keep_days"`
 }
 
 type DeployConfig struct {
@@ -120,6 +128,10 @@ func defaults() *Config {
 			SandboxRoot:          "./data/sandbox",
 			MaxTotalMB:           20480,
 			TaskLogRetentionDays: 90,
+			TaskRetentionDays:    180,
+			AuditRetentionDays:   180,
+			PackageKeepReleases:  10,
+			PackageKeepDays:      7,
 		},
 		Deploy: DeployConfig{
 			// 默认 ssh：无配置文件时也按真实远程部署处理，避免误把生产任务落进本机沙箱。
@@ -204,8 +216,19 @@ func (c *Config) Validate() error {
 	if strings.TrimSpace(c.Alert.WebhookURL) != "" && !isHTTPURL(c.Alert.WebhookURL) {
 		return fmt.Errorf("alert.webhook_url 必须是 http(s) 地址")
 	}
-	if c.Storage.TaskLogRetentionDays < 0 {
-		return fmt.Errorf("storage.task_log_retention_days 不能为负数：%d（0 表示不清理）", c.Storage.TaskLogRetentionDays)
+	for _, item := range []struct {
+		name  string
+		value int
+	}{
+		{"storage.task_log_retention_days", c.Storage.TaskLogRetentionDays},
+		{"storage.task_retention_days", c.Storage.TaskRetentionDays},
+		{"storage.audit_retention_days", c.Storage.AuditRetentionDays},
+		{"storage.package_keep_releases", c.Storage.PackageKeepReleases},
+		{"storage.package_keep_days", c.Storage.PackageKeepDays},
+	} {
+		if item.value < 0 {
+			return fmt.Errorf("%s 不能为负数：%d（0 表示不启用）", item.name, item.value)
+		}
 	}
 
 	// credential_key 显式配置时必须足够强；空值或默认占位值视为「未配置」，

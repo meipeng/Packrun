@@ -286,6 +286,10 @@ server:
 storage:
   max_total_mb: 20480   # 包仓库总容量上限
   task_log_retention_days: 90  # 任务步骤日志正文保留天数，0 = 不清理
+  package_keep_releases: 10    # 每个目录保留最近多少个版本的包（保证回滚窗口）
+  package_keep_days: 7         # 最近 N 天上传的包一律保留
+  task_retention_days: 180     # 终态任务保留天数
+  audit_retention_days: 180    # 审计日志保留天数
 alert:
   webhook_url: ""       # 留空只写服务日志；填企业微信群机器人地址即可推送
   format: wecom         # wecom | generic
@@ -312,6 +316,14 @@ deploy:
 
 后台每 `alert.check_interval_seconds` 秒巡检磁盘余量、包仓库配额、新出现的失败任务和证书到期，
 按 `alert.min_interval_seconds` 去重后推送；未配置 `webhook_url` 时只写 `[alert]` 前缀的服务日志。
+
+包仓库不会无限增长：后台每天按「每个目录保留最近 N 个版本 + 最近 N 天上传一律保留」回收历史包，
+超出窗口的批次无法再回滚。先看清单再动手：
+
+```bash
+./packrund gc            # dry-run，只打印将回收的包与原因
+./packrund gc -apply     # 真正删除
+```
 
 ## 生产前置
 
