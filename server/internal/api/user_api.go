@@ -1,8 +1,11 @@
 package api
 
 import (
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -10,6 +13,34 @@ import (
 	"github.com/packrun/packrun/internal/auth"
 	"github.com/packrun/packrun/internal/model"
 )
+
+// nullableUint 区分「请求里没带这个字段」与「显式传 null」。
+// 归属主账号需要支持清空，用 *uint 无法表达「显式置空」，会退化成「不修改」。
+type nullableUint struct {
+	Set   bool
+	Value *uint
+}
+
+func (n *nullableUint) UnmarshalJSON(data []byte) error {
+	n.Set = true
+	if string(data) == "null" {
+		n.Value = nil
+		return nil
+	}
+	var v uint
+	if err := json.Unmarshal(data, &v); err != nil {
+		return err
+	}
+	n.Value = &v
+	return nil
+}
+
+func (n nullableUint) ValueOrZero() uint {
+	if n.Value == nil {
+		return 0
+	}
+	return *n.Value
+}
 
 func (a *App) listUsers(c *gin.Context) {
 	var list []model.User
@@ -21,14 +52,33 @@ func (a *App) listUsers(c *gin.Context) {
 }
 
 type userReq struct {
-	Username    string  `json:"username"`
-	DisplayName string  `json:"displayName"`
-	Password    string  `json:"password"`
-	Role        string  `json:"role"`
-	ServerScope string  `json:"serverScope"`
-	ParentID    *uint   `json:"parentId"` // 归属主账号；空表示自身为主账号
-	Status      string  `json:"status"`
-	ProjectIDs  *[]uint `json:"projectIds"` // 授权项目：以项目成员关系承载子账户的可见范围
+	Username    string       `json:"username"`
+	DisplayName string       `json:"displayName"`
+	Password    string       `json:"password"`
+	Role        string       `json:"role"`
+	ServerScope string       `json:"serverScope"`
+	ParentID    nullableUint `json:"parentId"` // 归属主账号；显式传 null 表示解除归属
+	Status      string       `json:"status"`
+	ProjectIDs  *[]uint      `json:"projectIds"` // 授权项目：以项目成员关系承载子账户的可见范围
+}
+
+// validateParent 校验归属主账号：不能指向自己、父账号必须存在且本身是主账号。
+// 只允许一层归属，避免出现链式或环形引用。
+func (a *App) validateParent(userID uint, parentID *uint) string {
+	if parentID == nil || *parentID == 0 {
+		return ""
+	}
+	if userID != 0 && *parentID == userID {
+		return "归属主账号不能是自己"
+	}
+	var p model.User
+	if err := a.DB.First(&p, *parentID).Error; err != nil {
+		return "归属主账号不存在"
+	}
+	if p.ParentID != nil && *p.ParentID != 0 {
+		return "归属主账号必须是主账号，不能再挂到其他账号下"
+	}
+	return ""
 }
 
 // normalizeProjectGrants 校验并去重项目授权列表；不存在的项目整批拒绝。
@@ -114,9 +164,16 @@ func (a *App) createUser(c *gin.Context) {
 			return
 		}
 	}
+	if msg := a.validateParent(0, req.ParentID.Value); msg != "" {
+		badRequest(c, msg)
+		return
+	}
 	u := model.User{
 		Username: req.Username, DisplayName: req.DisplayName, PasswordHash: hash,
-		Role: req.Role, ServerScope: req.ServerScope, ParentID: req.ParentID, Status: status,
+		Role: req.Role, ServerScope: req.ServerScope, Status: status,
+	}
+	if req.ParentID.Set && req.ParentID.ValueOrZero() != 0 {
+		u.ParentID = req.ParentID.Value
 	}
 	if err := a.DB.Create(&u).Error; err != nil {
 		fail(c, 409, CodeConflict, "账号已存在")
@@ -184,8 +241,17 @@ func (a *App) updateUser(c *gin.Context) {
 		"role":         req.Role,
 		"server_scope": req.ServerScope,
 	}
-	if req.ParentID != nil {
-		updates["parent_id"] = *req.ParentID
+	if req.ParentID.Set {
+		if msg := a.validateParent(u.ID, req.ParentID.Value); msg != "" {
+			badRequest(c, msg)
+			return
+		}
+		// 显式传 null（或 0）表示解除归属，写入 NULL 而不是忽略。
+		if req.ParentID.ValueOrZero() == 0 {
+			updates["parent_id"] = nil
+		} else {
+			updates["parent_id"] = *req.ParentID.Value
+		}
 	}
 	if req.Status != "" {
 		updates["status"] = req.Status
@@ -215,8 +281,119 @@ func (a *App) updateUser(c *gin.Context) {
 			return
 		}
 	}
+	// 回读一次，保证响应里是最新值（尤其是被置空的 parentId）。
+	if err := a.DB.First(&u, u.ID).Error; err != nil {
+		internal(c, "读取用户失败")
+		return
+	}
 	a.audit(c, "user.update", u.Username, "ok", "", "调整角色/范围/状态/项目授权", false)
 	ok(c, u)
+}
+
+// deleteUser 软删除账号：保留任务与审计对操作人的引用，同时让该账号的会话立即失效。
+func (a *App) deleteUser(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	me := currentUser(c)
+	var u model.User
+	if err := a.DB.First(&u, id).Error; err != nil {
+		notFound(c, "用户不存在")
+		return
+	}
+	if u.ID == me.ID {
+		badRequest(c, "不能删除当前登录账号")
+		return
+	}
+	if u.Role == model.RoleAdmin && u.Status == "active" {
+		var admins int64
+		a.DB.Model(&model.User{}).Where("role = ? AND status = ?", model.RoleAdmin, "active").Count(&admins)
+		if admins <= 1 {
+			badRequest(c, "系统必须保留至少一个启用状态的管理员")
+			return
+		}
+	}
+	// 项目创建者是项目的唯一管理者，删掉会让项目没有可维护的人。
+	var owned int64
+	if err := a.DB.Model(&model.Project{}).Where("owner_id = ?", u.ID).Count(&owned).Error; err != nil {
+		internal(c, "检查项目归属失败")
+		return
+	}
+	if owned > 0 {
+		badRequest(c, fmt.Sprintf("该用户是 %d 个项目的创建者，请先转移或删除这些项目", owned))
+		return
+	}
+	// 执行中的任务会继续向数据库写日志，删除操作人会让现场无法追溯。
+	var running int64
+	if err := a.DB.Model(&model.Task{}).
+		Where("operator_id = ? AND status IN ?", u.ID,
+			[]string{model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting}).
+		Count(&running).Error; err != nil {
+		internal(c, "检查未完成任务失败")
+		return
+	}
+	if running > 0 {
+		badRequest(c, fmt.Sprintf("该用户还有 %d 个未完成任务，请先取消或等待结束", running))
+		return
+	}
+
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", u.ID).Delete(&model.ProjectMember{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", u.ID).Delete(&model.RecoveryCode{}).Error; err != nil {
+			return err
+		}
+		// 释放账号名便于重建同名账号；历史任务里存的是 operator 字符串，不受影响。
+		renamed := fmt.Sprintf("%s#deleted#%d", u.Username, time.Now().Unix())
+		if err := tx.Model(&u).Updates(map[string]any{
+			"username":           renamed,
+			"status":             "disabled",
+			"parent_id":          nil,
+			"otp_enabled":        false,
+			"otp_secret":         "",
+			"pending_otp_secret": "",
+			"pending_otp_at":     nil,
+			"token_version":      gorm.Expr("token_version + 1"),
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&u).Error
+	})
+	if err != nil {
+		internal(c, "删除用户失败")
+		return
+	}
+	a.audit(c, "user.delete", u.Username, "ok", "", "删除账号并失效其会话", false)
+	ok(c, gin.H{"deleted": true})
+}
+
+// resetUserOTP 由管理员清除指定账号的动态口令与恢复码，供用户重新绑定。
+// 同时递增令牌版本，让该账号所有在线会话立即失效。
+func (a *App) resetUserOTP(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var u model.User
+	if err := a.DB.First(&u, id).Error; err != nil {
+		notFound(c, "用户不存在")
+		return
+	}
+	err := a.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&u).Updates(map[string]any{
+			"otp_enabled":        false,
+			"otp_secret":         "",
+			"pending_otp_secret": "",
+			"pending_otp_at":     nil,
+			"last_otp_step":      0,
+			"token_version":      gorm.Expr("token_version + 1"),
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Where("user_id = ?", u.ID).Delete(&model.RecoveryCode{}).Error
+	})
+	if err != nil {
+		internal(c, "重置动态口令失败")
+		return
+	}
+	a.audit(c, "user.otp.reset", u.Username, "ok", "", "管理员清除动态口令，用户需重新绑定", false)
+	ok(c, gin.H{"reset": true})
 }
 
 func validUserStatus(status string) bool {

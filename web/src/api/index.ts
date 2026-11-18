@@ -381,6 +381,8 @@ export const userApi = {
   list: () => get<User[]>('/users'),
   create: (data: Record<string, unknown>) => post<User>('/users', data),
   update: (id: number, data: Record<string, unknown>) => put<User>(`/users/${id}`, data),
+  remove: (id: number) => del<{ deleted: boolean }>(`/users/${id}`),
+  resetOtp: (id: number) => post<{ reset: boolean }>(`/users/${id}/otp/reset`),
 }
 
 export const projectApi = {

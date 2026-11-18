@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { projectApi, serverApi, userApi, type Project, type Server, type User } from '@/api'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
 
 const list = ref<User[]>([])
 const servers = ref<Server[]>([])
@@ -120,6 +123,8 @@ async function save() {
   try {
     // 项目列表加载失败时不要提交授权，避免把既有授权清空。
     const payload: Record<string, unknown> = { ...dialog.form }
+    // 归属主账号需要显式传 null 才能解除：undefined 会被后端当作「未提供」。
+    payload.parentId = dialog.form.parentId ? Number(dialog.form.parentId) : null
     if (!projectsReady.value) delete payload.projectIds
     if (dialog.form.id) {
       await userApi.update(dialog.form.id, payload)
@@ -134,6 +139,44 @@ async function save() {
     ElMessage.error(e.message)
   } finally {
     dialog.saving = false
+  }
+}
+
+async function removeUser(row: User) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除账号 ${row.username}？该账号会立即下线，历史任务与审计记录保留。`,
+      '删除用户',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await userApi.remove(row.id)
+    ElMessage.success('已删除')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function resetOtp(row: User) {
+  try {
+    await ElMessageBox.confirm(
+      `确认清除 ${row.username} 的动态口令？该账号会立即下线，需重新绑定认证器。`,
+      '重置动态口令',
+      { type: 'warning' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await userApi.resetOtp(row.id)
+    ElMessage.success('已重置，请通知用户重新绑定')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e.message)
   }
 }
 
@@ -206,9 +249,22 @@ onMounted(load)
             <span class="time">{{ row.lastLoginAt ? new Date(row.lastLoginAt).toLocaleString('zh-CN', { hour12: false }) : '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="90" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" :disabled="loading" @click="openEdit(row)">编辑</el-button>
+            <el-button
+              v-if="row.otpEnabled"
+              link
+              type="warning"
+              :disabled="loading"
+              @click="resetOtp(row)"
+            >重置口令</el-button>
+            <el-button
+              link
+              type="danger"
+              :disabled="loading || row.id === auth.user?.id"
+              @click="removeUser(row)"
+            >删除</el-button>
           </template>
         </el-table-column>
       </el-table>

@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 // 角色
 const (
@@ -63,6 +67,8 @@ type User struct {
 	LastOTPStep      int64      `gorm:"default:0" json:"-"`
 	CreatedAt        time.Time  `json:"createdAt"`
 	UpdatedAt        time.Time  `json:"updatedAt"`
+	// DeletedAt 软删除：保留任务与审计对操作人的引用，同时让会话立即失效。
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // RecoveryCode 是一次性登录恢复码，只保存哈希，明文仅在生成时返回一次。
