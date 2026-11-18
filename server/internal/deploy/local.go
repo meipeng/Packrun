@@ -21,7 +21,7 @@ type LocalDeployer struct {
 	StepDelay   time.Duration
 }
 
-func (d *LocalDeployer) Deploy(ctx context.Context, req Request) error {
+func (d *LocalDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 	target, err := d.resolveTarget(req)
 	if err != nil {
 		return err
@@ -29,6 +29,20 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) error {
 	if err := checkUnpackedSize(req); err != nil {
 		return err
 	}
+	var backupPath string
+	defer func() {
+		if retErr == nil || backupPath == "" {
+			return
+		}
+		req.Hooks.logf("部署失败，正在恢复部署前版本…")
+		if restoreErr := restoreLocalBackup(target, backupPath); restoreErr != nil {
+			req.Hooks.logf("自动恢复失败：" + restoreErr.Error())
+			retErr = fmt.Errorf("%w；自动恢复失败：%v（备份保留在 %s）", retErr, restoreErr, backupPath)
+			return
+		}
+		req.Hooks.logf("已自动恢复部署前版本")
+		retErr = fmt.Errorf("%w（已自动恢复部署前版本）", retErr)
+	}()
 	maxBytes, maxEntries := unpackBudget(req)
 
 	// 1. 准备目录
@@ -70,6 +84,7 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) error {
 			if err := os.Rename(target, backup); err != nil {
 				return fmt.Errorf("备份失败: %w", err)
 			}
+			backupPath = backup
 			if err := os.MkdirAll(target, 0o755); err != nil {
 				return err
 			}
@@ -446,6 +461,25 @@ func dirSizeMB(path string) (int64, error) {
 		return 0, err
 	}
 	return (total + (1 << 20) - 1) >> 20, nil
+}
+
+// restoreLocalBackup 用备份目录替换失败的目标目录。
+// 先把失败现场改名保留，成功恢复后再清理；若恢复动作失败，失败现场和备份都还在。
+func restoreLocalBackup(target, backup string) error {
+	failed := target + ".failed-" + time.Now().Format("20060102150405.000000000")
+	if _, err := os.Stat(target); err == nil {
+		if err := os.Rename(target, failed); err != nil {
+			return fmt.Errorf("保留失败目录: %w", err)
+		}
+	}
+	if err := os.Rename(backup, target); err != nil {
+		if _, statErr := os.Stat(failed); statErr == nil {
+			_ = os.Rename(failed, target)
+		}
+		return fmt.Errorf("还原备份: %w", err)
+	}
+	_ = os.RemoveAll(failed)
+	return nil
 }
 
 // pruneBackups 只保留最近 keep 个 <target>.bak-* 备份，返回清理数量。

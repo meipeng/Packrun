@@ -278,6 +278,64 @@ func TestLocalDeployZipUploadMode(t *testing.T) {
 	}
 }
 
+func TestLocalDeployRestoresBackupOnFailure(t *testing.T) {
+	root := t.TempDir()
+	pkgDir := t.TempDir()
+	zipPath := filepath.Join(pkgDir, "app.zip")
+	newZipWithFiles(t, zipPath, []string{"index.html"}, 16)
+	info, err := os.Stat(zipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(root, "srv-1", "app")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(target, "old.txt")
+	if err := os.WriteFile(oldFile, []byte("old-version"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &LocalDeployer{SandboxRoot: root}
+	err = d.Deploy(context.Background(), Request{
+		Server: model.Server{Name: "srv-1"},
+		Directory: model.Directory{
+			Path: "/app", AllowOverwrite: true, BackupBeforeDeploy: true,
+			KeepReleases: 3, MaxSizeMB: 16, PackageMode: model.PackageModeUnpack,
+		},
+		// 故意给错误的 SHA256，让部署在备份之后失败。
+		Package:    model.Package{Name: "app.zip", Kind: "zip", Size: info.Size(), SHA256: strings.Repeat("0", 64)},
+		SourcePath: zipPath,
+	})
+	if err == nil {
+		t.Fatal("SHA256 不匹配时应部署失败")
+	}
+	if !strings.Contains(err.Error(), "已自动恢复部署前版本") {
+		t.Fatalf("失败原因应包含自动恢复标记，实际: %v", err)
+	}
+
+	data, err := os.ReadFile(oldFile)
+	if err != nil {
+		t.Fatalf("旧版本文件未恢复: %v", err)
+	}
+	if string(data) != "old-version" {
+		t.Fatalf("旧版本内容不一致: %q", data)
+	}
+	if _, err := os.Stat(filepath.Join(target, "index.html")); !os.IsNotExist(err) {
+		t.Fatalf("失败版本的文件不应留在目标目录")
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".incoming-") {
+			t.Fatalf("失败后不应残留上传临时文件: %s", entry.Name())
+		}
+	}
+}
+
 func TestUnzipNormal(t *testing.T) {
 	dir := t.TempDir()
 	zipPath := filepath.Join(dir, "app.zip")

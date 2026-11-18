@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -17,6 +18,11 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "backup" {
+		runBackup(os.Args[2:])
+		return
+	}
+
 	cfgPath := flag.String("config", "configs/config.yaml", "配置文件路径")
 	flag.Parse()
 
@@ -110,4 +116,33 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("服务退出: %v", err)
 	}
+}
+
+// runBackup 执行一次在线数据备份，供 cron/systemd timer 调用。
+func runBackup(args []string) {
+	fs := flag.NewFlagSet("packrund backup", flag.ExitOnError)
+	cfgPath := fs.String("config", "configs/config.yaml", "配置文件路径")
+	out := fs.String("out", "./backups", "备份输出目录")
+	keep := fs.Int("keep", 7, "保留最近 N 份备份")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		log.Fatalf("加载配置失败: %v", err)
+	}
+	db, err := store.OpenForBackup(cfg)
+	if err != nil {
+		log.Fatalf("打开数据库失败: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		log.Fatalf("获取数据库连接失败: %v", err)
+	}
+	defer sqlDB.Close()
+
+	dest, err := store.Backup(db, cfg, *out, *keep)
+	if err != nil {
+		log.Fatalf("备份失败: %v", err)
+	}
+	fmt.Printf("备份完成: %s\n", dest)
 }

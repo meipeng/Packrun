@@ -69,7 +69,7 @@ func ResolveServerCredential(srv model.Server, resolver SecretResolver) (string,
 	return ResolveCredential(srv.CredentialRef)
 }
 
-func (d *SSHDeployer) Deploy(ctx context.Context, req Request) error {
+func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 	target, err := NormalizePath(req.Directory.Path)
 	if err != nil {
 		return err
@@ -86,6 +86,29 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) error {
 
 	req.Hooks.logf(fmt.Sprintf("已连接 %s@%s:%d", req.Server.Username, req.Server.Host, req.Server.Port))
 	remote := &remoteExec{client: client, timeout: 15 * time.Minute}
+
+	var backupPath string
+	defer func() {
+		if retErr == nil || backupPath == "" {
+			return
+		}
+		req.Hooks.logf("部署失败，正在恢复部署前版本…")
+		// 任务取消时原 ctx 已失效，恢复动作使用独立超时，尽量把目标目录还原。
+		restoreCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		out, restoreErr := remote.run(restoreCtx, restoreRemoteBackupCommand(target, backupPath))
+		if restoreErr != nil {
+			msg := strings.TrimSpace(out)
+			if msg == "" {
+				msg = restoreErr.Error()
+			}
+			req.Hooks.logf("自动恢复失败：" + msg)
+			retErr = fmt.Errorf("%w；自动恢复失败：%v（备份保留在 %s）", retErr, restoreErr, backupPath)
+			return
+		}
+		req.Hooks.logf("已自动恢复部署前版本")
+		retErr = fmt.Errorf("%w（已自动恢复部署前版本）", retErr)
+	}()
 
 	// 1. 准备目录
 	req.Hooks.step(StepPrepare)
@@ -126,11 +149,15 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) error {
 	req.Hooks.stage("backup", 25)
 	if req.Directory.BackupBeforeDeploy {
 		stamp := time.Now().Format("20060102150405")
-		cmd := fmt.Sprintf("if [ -n \"$(ls -A %s 2>/dev/null)\" ]; then cp -a %s %s.bak-%s && echo BACKED_UP; else echo EMPTY; fi",
-			shellQuote(target), shellQuote(target), shellQuote(target), stamp)
+		backup := target + ".bak-" + stamp
+		cmd := fmt.Sprintf("if [ -n \"$(ls -A %s 2>/dev/null)\" ]; then cp -a %s %s && echo BACKED_UP; else echo EMPTY; fi",
+			shellQuote(target), shellQuote(target), shellQuote(backup))
 		out, err := remote.run(ctx, cmd)
 		if err != nil {
 			return fmt.Errorf("备份失败: %v %s", err, out)
+		}
+		if strings.Contains(out, "BACKED_UP") {
+			backupPath = backup
 		}
 		req.Hooks.logf(strings.TrimSpace(out))
 	} else {
@@ -304,6 +331,17 @@ func runRemoteScript(ctx context.Context, remote *remoteExec, srv model.Server, 
 	}
 	hooks.logf(fmt.Sprintf("脚本「%s」执行完成", script.Name))
 	return nil
+}
+
+// restoreRemoteBackupCommand 用备份目录换回目标目录。
+// 失败现场先改名保留，恢复成功后再删除；恢复失败时现场与备份都保留，便于人工处理。
+func restoreRemoteBackupCommand(target, backup string) string {
+	failed := target + ".failed-" + time.Now().Format("20060102150405.000000000")
+	return fmt.Sprintf(
+		"if [ -e %s ]; then mv %s %s; fi; mv %s %s && rm -rf %s",
+		shellQuote(target), shellQuote(target), shellQuote(failed),
+		shellQuote(backup), shellQuote(target), shellQuote(failed),
+	)
 }
 
 // pruneRemoteBackups 只保留最近 keep 个 <target>.bak-* 备份，返回清理数量。
