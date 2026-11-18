@@ -314,22 +314,48 @@ export const scriptApi = {
   remove: (id: number) => del<{ deleted: boolean }>(`/scripts/${id}`),
 }
 
+/** 单包上限，与后端 maxPackageSize、Nginx client_max_body_size 保持一致 */
+export const MAX_PACKAGE_BYTES = 200 * 1024 * 1024
+
+function uploadOnce(file: File, onProgress?: (pct: number) => void) {
+  const form = new FormData()
+  form.append('file', file)
+  return post<Package>('/packages', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    // 全局 60s 超时会在上传大包（上限 200MB）中途中断请求，上传单独放宽到 15 分钟。
+    timeout: 15 * 60 * 1000,
+    onUploadProgress: (e: ProgressEvent) => {
+      if (onProgress && e.total) {
+        onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    },
+  })
+}
+
 export const packageApi = {
   list: () => get<Package[]>('/packages'),
   remove: (id: number) => del<{ deleted: boolean }>(`/packages/${id}`),
-  upload: (file: File, onProgress?: (pct: number) => void) => {
-    const form = new FormData()
-    form.append('file', file)
-    return post<Package>('/packages', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-      // 全局 60s 超时会在上传大包（上限 200MB）中途中断请求，上传单独放宽到 15 分钟。
-      timeout: 15 * 60 * 1000,
-      onUploadProgress: (e: ProgressEvent) => {
-        if (onProgress && e.total) {
-          onProgress(Math.round((e.loaded / e.total) * 100))
-        }
-      },
-    })
+  /**
+   * 上传安装包。网络中断、超时、网关错误自动重试一次（大包走公网/隧道时很常见）。
+   * 服务端采用「临时文件 + fsync + 原子改名」，失败不会留下半截包文件，
+   * 因此重试不会污染包仓库；只有响应丢失的极端情况可能产生一条重复记录。
+   */
+  upload: async (
+    file: File,
+    onProgress?: (pct: number) => void,
+    options?: { retries?: number; onRetry?: (attempt: number) => void },
+  ): Promise<Package> => {
+    const retries = options?.retries ?? 1
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await uploadOnce(file, onProgress)
+      } catch (e: any) {
+        if (attempt >= retries || !e?.retryable) throw e
+        options?.onRetry?.(attempt + 1)
+        onProgress?.(0)
+        await new Promise((resolve) => setTimeout(resolve, 600 * (attempt + 1)))
+      }
+    }
   },
 }
 

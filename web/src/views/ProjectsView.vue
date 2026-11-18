@@ -5,6 +5,7 @@ import { Delete, Folder, Plus, Setting, UploadFilled } from '@element-plus/icons
 import { useAuthStore } from '@/stores/auth'
 import {
   directoryApi,
+  MAX_PACKAGE_BYTES,
   packageApi,
   projectApi,
   scriptApi,
@@ -38,11 +39,12 @@ const selectedBatch = ref('')
 let watchedBatch = ''
 
 const staged = ref<{ mode: 'file'; file: File } | { mode: 'pkg'; pkg: Package } | null>(null)
-const uploadState = reactive({ active: false, phase: '' as '' | 'upload' | 'publish', pct: 0 })
+const uploadState = reactive({ active: false, phase: '' as '' | 'upload' | 'publish', pct: 0, retry: 0 })
 const publishResult = ref<{ batchNo: string; version: string } | null>(null)
 const publishError = ref('')
 const uploadLabel = computed(() => {
   if (uploadState.phase === 'publish') return '校验通过，正在提交发布任务…'
+  if (uploadState.retry > 0) return `网络中断，正在第 ${uploadState.retry} 次自动重试…`
   if (uploadState.pct >= 100) return '上传完成，正在校验文件格式并登记 SHA256…'
   return `上传中 ${uploadState.pct}%`
 })
@@ -349,7 +351,7 @@ function onFileChange(file: any) {
     ElMessage.error('仅支持 .zip 与 .jar')
     return
   }
-  if (raw.size > 200 * 1024 * 1024) {
+  if (raw.size > MAX_PACKAGE_BYTES) {
     ElMessage.error('单包不得超过 200MB')
     return
   }
@@ -475,7 +477,13 @@ async function doPublish() {
     if (staged.value.mode === 'file') {
       uploadState.active = true
       uploadState.phase = 'upload'
-      const pkg = await packageApi.upload(staged.value.file, (pct) => (uploadState.pct = pct))
+      uploadState.retry = 0
+      const pkg = await packageApi.upload(
+        staged.value.file,
+        (pct) => (uploadState.pct = pct),
+        { onRetry: (attempt) => (uploadState.retry = attempt) },
+      )
+      uploadState.retry = 0
       packages.value.unshift(pkg)
       packageId = pkg.id
     } else {
@@ -505,6 +513,7 @@ async function doPublish() {
     uploadState.active = false
     uploadState.phase = ''
     uploadState.pct = 0
+    uploadState.retry = 0
   }
 }
 

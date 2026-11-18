@@ -50,7 +50,11 @@ function stopPolling() {
 
 async function cancel() {
   try {
-    await ElMessageBox.confirm('确认取消该任务？已产生的中间文件不会自动回滚。', '取消任务', { type: 'warning' })
+    await ElMessageBox.confirm(
+      '确认取消该任务？排队中的任务会直接取消；执行中的任务会尝试恢复部署前版本，恢复失败时需人工核对目标目录。',
+      '取消任务',
+      { type: 'warning' },
+    )
     await taskApi.cancel(id)
     ElMessage.success('已发送取消指令')
     load()

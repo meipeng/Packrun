@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -34,78 +33,68 @@ func (a *App) uploadPackage(c *gin.Context) {
 		forbidden(c, "审计角色不可上传安装包")
 		return
 	}
-	file, err := c.FormFile("file")
-	if err != nil {
-		badRequest(c, "请选择要上传的包文件")
-		return
-	}
-	if file.Size <= 0 {
-		badRequest(c, "包文件为空")
-		return
-	}
-	if file.Size > maxPackageSize {
-		badRequest(c, fmt.Sprintf("包大小超过上限 %d MB", maxPackageSize>>20))
+	// 声明长度已超限时直接拒绝，不必先读完整个请求体。
+	if c.Request.ContentLength > int64(maxPackageSize)+uploadMaxOverhead {
+		fail(c, http.StatusRequestEntityTooLarge, CodeBadRequest,
+			fmt.Sprintf("包大小超过上限 %d MB", maxPackageSize>>20))
 		return
 	}
 
-	ext := strings.ToLower(filepath.Ext(file.Filename))
+	// 流式解析 multipart：文件段直接写进仓库目录，
+	// 不再经 ParseMultipartForm 先落系统临时目录再复制一次（省一半磁盘 IO 与空间）。
+	reader, err := c.Request.MultipartReader()
+	if err != nil {
+		badRequest(c, "上传请求格式不正确，请重新选择文件")
+		return
+	}
+	part, err := nextFilePart(reader)
+	if err != nil {
+		writeUploadFailure(c, err)
+		return
+	}
+	if part == nil {
+		badRequest(c, "请选择要上传的包文件")
+		return
+	}
+	// 这里不做 defer part.Close()：Part.Close 会把该段剩余字节全部读完，
+	// 遇到「超限」「配额已满」等提前返回时会被迫读完整包才响应。
+	// 交给 HTTP 服务端按 256KB 上限排空后关连接即可。
+
+	filename := part.FileName()
+	ext := strings.ToLower(filepath.Ext(filename))
 	if ext != ".zip" && ext != ".jar" {
 		badRequest(c, "仅支持 .zip 与 .jar 包")
 		return
 	}
-	name, err := sanitizePackageName(file.Filename)
+	name, err := sanitizePackageName(filename)
 	if err != nil {
 		badRequest(c, err.Error())
 		return
 	}
 
-	src, err := file.Open()
-	if err != nil {
-		internal(c, "读取上传文件失败")
+	// 不信任扩展名：先读文件头确认确实是 ZIP/JAR，已读字节稍后接回写入流。
+	header := make([]byte, len(zipMagic))
+	n, err := io.ReadFull(part, header)
+	if n == 0 {
+		badRequest(c, "包文件为空")
 		return
 	}
-	defer src.Close()
-
-	// 不信任扩展名：读取文件头确认确实是 ZIP/JAR，再回到起点。
-	header := make([]byte, len(zipMagic))
-	if _, err := io.ReadFull(src, header); err != nil || !bytes.Equal(header, zipMagic) {
+	if err != nil || !bytes.Equal(header[:n], zipMagic) {
 		badRequest(c, "文件内容不是有效的 ZIP/JAR")
 		return
 	}
-	if _, err := src.Seek(0, io.SeekStart); err != nil {
-		internal(c, "读取上传文件失败")
-		return
-	}
 
-	// 仓库容量预检：按声明大小先拦一次，写入后按实际字节复核。
-	if tooLarge := a.packageQuotaExceeded(file.Size); tooLarge {
+	// 仓库容量预检：按请求体估算先拦一次，写入后按实际占用复核。
+	if tooLarge := a.packageQuotaExceeded(uploadPayloadEstimate(c.Request.ContentLength)); tooLarge {
 		fail(c, http.StatusInsufficientStorage, CodeInternalError, "包仓库容量已满")
 		return
 	}
 
 	key := filepath.Join(time.Now().Format("200601"), randomHex(8)+ext)
 	dst := filepath.Join(a.Cfg.Storage.PackageDir, key)
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		internal(c, "创建存储目录失败")
-		return
-	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	written, sum, err := savePackageFile(dst, io.MultiReader(bytes.NewReader(header[:n]), part), maxPackageSize)
 	if err != nil {
-		internal(c, "写入存储失败")
-		return
-	}
-
-	h := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(out, h), io.LimitReader(src, maxPackageSize+1))
-	closeErr := out.Close()
-	if copyErr != nil || closeErr != nil {
-		os.Remove(dst)
-		internal(c, "保存包文件失败")
-		return
-	}
-	if written > maxPackageSize {
-		os.Remove(dst)
-		badRequest(c, fmt.Sprintf("包大小超过上限 %d MB", maxPackageSize>>20))
+		writeUploadFailure(c, err)
 		return
 	}
 	if tooLarge := a.packageDirExceedsQuota(); tooLarge {
@@ -118,7 +107,7 @@ func (a *App) uploadPackage(c *gin.Context) {
 		Name:       name,
 		Kind:       strings.TrimPrefix(ext, "."),
 		Size:       written,
-		SHA256:     hex.EncodeToString(h.Sum(nil)),
+		SHA256:     sum,
 		StorageKey: key,
 		UploaderID: currentUser(c).ID,
 	}
@@ -306,13 +295,22 @@ func StartPackageRetentionWorker(app *App, interval time.Duration) {
 	}
 	go func() {
 		log.Printf("[packages] 上传记录保留 %d 天，超期自动清理已启动", packageRetentionDays)
-		purgeExpiredPackages(app)
+		maintainPackageStore(app)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for range ticker.C {
-			purgeExpiredPackages(app)
+			maintainPackageStore(app)
 		}
 	}()
+}
+
+// maintainPackageStore 执行一次仓库维护：清理过期上传记录，顺带回收异常退出残留的临时文件。
+func maintainPackageStore(app *App) {
+	purgeExpiredPackages(app)
+	// 一小时以内的临时文件可能属于正在进行的上传，不动。
+	if n := sweepStaleUploads(app.Cfg.Storage.PackageDir, time.Hour); n > 0 {
+		log.Printf("[packages] 已清理 %d 个残留的上传临时文件", n)
+	}
 }
 
 func randomHex(n int) string {

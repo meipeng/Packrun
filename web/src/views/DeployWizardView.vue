@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import { UploadFilled } from '@element-plus/icons-vue'
 import {
   directoryApi,
+  MAX_PACKAGE_BYTES,
   packageApi,
   scriptApi,
   serverApi,
@@ -35,6 +36,7 @@ const form = reactive({
 
 const uploading = ref(false)
 const uploadPct = ref(0)
+const uploadRetry = ref(0)
 const uploadError = ref('')
 const uploadedPkgId = ref(0)
 const submitting = ref(false)
@@ -99,18 +101,22 @@ async function doUpload(options: any) {
     ElMessage.error(uploadError.value)
     return
   }
-  if (file.size > 200 * 1024 * 1024) {
+  if (file.size > MAX_PACKAGE_BYTES) {
     uploadError.value = '单包不得超过 200MB'
     ElMessage.error(uploadError.value)
     return
   }
   uploading.value = true
   uploadPct.value = 0
+  uploadRetry.value = 0
   try {
-    const pkg = await packageApi.upload(file, (pct) => (uploadPct.value = pct))
+    const pkg = await packageApi.upload(file, (pct) => (uploadPct.value = pct), {
+      onRetry: (attempt) => (uploadRetry.value = attempt),
+    })
     packages.value.unshift(pkg)
     form.packageId = pkg.id
     uploadedPkgId.value = pkg.id
+    uploadRetry.value = 0
     ElMessage.success('上传成功，文件校验通过')
     options.onSuccess?.(pkg)
   } catch (e: any) {
@@ -119,6 +125,7 @@ async function doUpload(options: any) {
     options.onError?.(e)
   } finally {
     uploading.value = false
+    uploadRetry.value = 0
   }
 }
 
@@ -255,7 +262,9 @@ onMounted(loadBase)
 
           <div v-if="uploading" class="upload-progress">
             <el-progress :percentage="uploadPct" :stroke-width="8" :show-text="false" />
-            <div class="upload-progress-text">正在上传并校验文件格式… {{ uploadPct }}%</div>
+            <div class="upload-progress-text">
+              {{ uploadRetry > 0 ? `网络中断，正在第 ${uploadRetry} 次自动重试…` : `正在上传并校验文件格式… ${uploadPct}%` }}
+            </div>
           </div>
 
           <el-alert

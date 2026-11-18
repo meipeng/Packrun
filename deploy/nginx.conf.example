@@ -47,8 +47,10 @@ server {
     # 前端 CSP：Element Plus 运行时注入 inline style，故 style-src 需保留 'unsafe-inline'
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'" always;
 
-    # 与服务端 maxPackageSize 保持一致（200MB）
-    client_max_body_size 200m;
+    # 单包上限 200MB 由服务端 maxPackageSize 判定，这里再留 10MB 余量：
+    # multipart 边界与字段头会让请求体略大于文件本身，若这里也卡 200m，
+    # 接近上限的包会被 Nginx 直接 413（HTML 报错页），前端拿不到可读提示。
+    client_max_body_size 210m;
     client_body_timeout  600s;
 
     # 通用限流；登录接口使用下方独立的 packrun_login 区域
