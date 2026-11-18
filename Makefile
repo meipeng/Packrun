@@ -21,7 +21,7 @@ PKG_GOARCH ?= amd64
 PKG_NAME := packrun-$(PKG_GOOS)-$(PKG_GOARCH)
 PKG_DIR := dist/$(PKG_NAME)
 
-.PHONY: build web sync-web clean package
+.PHONY: build web sync-web clean package check
 
 # 单包构建：前端产物同步到 internal/webui/dist 后由 go:embed 打进二进制。
 # 交叉编译示例：GOOS=linux GOARCH=amd64 make build
@@ -41,6 +41,12 @@ package: web sync-web
 	cp deploy/nginx.conf.example deploy/frps.toml deploy/frpc.toml "$(PKG_DIR)/deploy/"
 	tar -C dist -czf "dist/$(PKG_NAME).tar.gz" "$(PKG_NAME)"
 	@echo "部署包: dist/$(PKG_NAME).tar.gz"
+
+# 本地对齐 CI：Go 静态检查与测试 + 前端类型检查。
+check:
+	cd server && $(GO_ENV) "$(GO)" vet ./...
+	cd server && $(GO_ENV) "$(GO)" test ./...
+	cd web && $(PNPM) type-check
 
 web:
 	cd web && $(PNPM) install --frozen-lockfile && $(PNPM) build
