@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { taskApi, type Task } from '@/api'
 import { isRunning, statusMeta } from '@/utils/status'
@@ -47,6 +47,27 @@ function duration(t: Task) {
   if (!t.startedAt || !t.finishedAt) return '—'
   const sec = Math.max(0, Math.round((new Date(t.finishedAt).getTime() - new Date(t.startedAt).getTime()) / 1000))
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`
+}
+
+// 移除已结束的任务记录；进行中的任务要先取消才能移除。
+async function removeTask(t: Task) {
+  try {
+    await ElMessageBox.confirm(
+      `确定移除任务 ${t.taskNo}？步骤日志将一并删除，且不影响已发布结果与审计记录。`,
+      '移除任务',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await taskApi.remove(t.id)
+    ElMessage.success('任务已移除')
+    if (total.value % query.pageSize === 1 && query.page > 1) query.page -= 1
+    load()
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  }
 }
 
 onMounted(load)
@@ -116,6 +137,11 @@ onMounted(load)
         <el-table-column label="创建时间" width="160">
           <template #default="{ row }">
             <span class="time">{{ new Date(row.createdAt).toLocaleString('zh-CN', { hour12: false }) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button v-if="!isRunning(row.status)" link type="danger" @click.stop="removeTask(row)">移除</el-button>
           </template>
         </el-table-column>
       </el-table>

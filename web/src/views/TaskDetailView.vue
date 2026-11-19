@@ -63,6 +63,22 @@ async function cancel() {
   }
 }
 
+// 移除已结束的任务记录，回到任务列表。
+async function removeTask() {
+  try {
+    await ElMessageBox.confirm(
+      `确定移除任务 ${task.value?.taskNo}？步骤日志将一并删除，且不影响已发布结果与审计记录。`,
+      '移除任务',
+      { type: 'warning', confirmButtonText: '移除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    )
+    await taskApi.remove(id)
+    ElMessage.success('任务已移除')
+    router.push('/tasks')
+  } catch (e: any) {
+    if (e !== 'cancel') ElMessage.error(e.message || '移除失败')
+  }
+}
+
 function stepType(status: string) {
   return status === 'success' ? 'success' : status === 'failed' ? 'danger' : status === 'running' ? 'primary' : 'info'
 }
@@ -94,7 +110,8 @@ onBeforeUnmount(stopPolling)
       </div>
       <div class="actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>
-        <el-button v-if="task && isRunning(task.status) && auth.canDeploy" type="danger" plain @click="cancel">取消任务</el-button>
+        <el-button v-if="task && !running && auth.canDeploy" type="danger" plain @click="removeTask">移除任务</el-button>
+        <el-button v-if="task && running && auth.canDeploy" type="danger" plain @click="cancel">取消任务</el-button>
       </div>
     </div>
 

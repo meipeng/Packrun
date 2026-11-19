@@ -64,6 +64,7 @@ func NewRouter(app *App) *gin.Engine {
 		authed.GET("/tasks/:id", app.getTask)
 		authed.POST("/tasks", app.createTask)
 		authed.POST("/tasks/:id/cancel", app.cancelTask)
+		authed.DELETE("/tasks/:id", app.deleteTask)
 	}
 
 	// 管理员：配置类写操作

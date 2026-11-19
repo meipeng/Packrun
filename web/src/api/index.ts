@@ -385,6 +385,7 @@ export const taskApi = {
     otp?: string
   }) => post<Task>('/tasks', data),
   cancel: (id: number) => post<{ canceled: boolean }>(`/tasks/${id}/cancel`),
+  remove: (id: number) => del<{ deleted: boolean }>(`/tasks/${id}`),
 }
 
 export const auditApi = {

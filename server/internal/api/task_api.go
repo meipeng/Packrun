@@ -470,6 +470,47 @@ func (a *App) cancelTask(c *gin.Context) {
 	badRequest(c, "任务进程已结束")
 }
 
+// deleteTask 移除一条已结束的任务记录（连同步骤日志）。
+// 与保留期清理同一口径：只允许删除终态任务，进行中的任务必须先取消；
+// 权限与包移除一致：审计员不可删，发布者只能删自己发起的任务。
+func (a *App) deleteTask(c *gin.Context) {
+	u := currentUser(c)
+	if u.Role == model.RoleAuditor {
+		forbidden(c, "审计角色不可移除任务")
+		return
+	}
+	id, _ := strconv.Atoi(c.Param("id"))
+	var task model.Task
+	if err := a.DB.First(&task, id).Error; err != nil {
+		notFound(c, "任务不存在")
+		return
+	}
+	if !checkServerScope(u, task.ServerID) {
+		forbidden(c, "无权移除该任务")
+		return
+	}
+	if u.Role != model.RoleAdmin && task.OperatorID != u.ID {
+		forbidden(c, "只能移除自己发起的任务")
+		return
+	}
+	switch task.Status {
+	case model.TaskSuccess, model.TaskFailed, model.TaskCanceled:
+	default:
+		badRequest(c, "任务仍在进行中，请先取消再移除")
+		return
+	}
+	if err := a.DB.Where("task_id = ?", task.ID).Delete(&model.TaskStep{}).Error; err != nil {
+		internal(c, "删除任务步骤失败")
+		return
+	}
+	if err := a.DB.Delete(&model.Task{}, task.ID).Error; err != nil {
+		internal(c, "移除任务失败")
+		return
+	}
+	a.audit(c, "task.delete", task.TaskNo, "ok", task.TaskNo, "移除已结束任务记录", task.OTPVerified)
+	ok(c, gin.H{"deleted": true})
+}
+
 // ---------- 概览 ----------
 
 func (a *App) overview(c *gin.Context) {
