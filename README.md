@@ -37,6 +37,7 @@ start.sh           启动脚本（后台运行/停止、监听地址、子路径
 | [docs/wiki/README.md](docs/wiki/README.md) | Code Wiki：项目概览、系统架构、后端模块、数据模型、API、执行引擎、认证安全、前端、运维与测试 |
 | [docs/02-技术选型与客户端设计.md](docs/02-技术选型与客户端设计.md) | 架构定稿、框架选型、页面与接口约定 |
 | [docs/03-部署与使用手册.md](docs/03-部署与使用手册.md) | 生产部署（构建 / systemd / Nginx / frp / 备份升级）、使用手册、已知限制与排查 |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | 路线图：里程碑（M1 可靠性收口 / M2 执行引擎 / M3 平台化）、验收标准、维护约定 |
 
 ## 快速上手：第一次发布
 
