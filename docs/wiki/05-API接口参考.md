@@ -103,6 +103,9 @@
 | GET | `/api/v1/tasks/:id` | 数据范围 | 任务详情 + 步骤 |
 | POST | `/api/v1/tasks` | 非审计员 + 数据范围 | 创建单目标部署任务 |
 | POST | `/api/v1/tasks/:id/cancel` | 非审计员 + 数据范围 | 取消任务 |
+| POST | `/api/v1/tasks/:id/resume` | 非审计员 + 数据范围 | 恢复中断任务（跳过已完成步骤重新入队） |
+| POST | `/api/v1/tasks/:id/mark-failed` | 非审计员 + 数据范围 | 中断任务人工标记失败 |
+| DELETE | `/api/v1/tasks/:id` | 非审计员（本人或管理员）+ 数据范围 | 移除已结束任务及步骤日志 |
 | GET | `/api/v1/audit` | 管理员/审计员 | 审计日志分页 |
 | GET | `/api/v1/users` | 管理员 | 用户列表 |
 | POST | `/api/v1/users` | 管理员 | 新增用户 |
@@ -559,16 +562,31 @@
 
 `keyword` 匹配任务号、包名、操作人。
 
-`GET /api/v1/tasks/:id` → `{ "task": {...}, "steps": [...] }`。
+`GET /api/v1/tasks/:id` → `{ "task": {...}, "steps": [...], "scripts": [...] }`；
+`scripts` 为受理时固化的脚本快照（`task_scripts` 行）。
 
 ### 10.3 取消
 
 `POST /api/v1/tasks/:id/cancel` → `{"canceled":true}`。
 
 - 终态任务 → 400；
+- `interrupted` → 400，引导使用 resume / mark-failed；
 - `pending` → 直接写 `canceled`；
 - 运行中 → 触发上下文取消，执行器返回后归为 `canceled`；
 - 已无运行进程 → 400「任务进程已结束」。
+
+### 10.4 中断恢复 / 标记失败
+
+`POST /api/v1/tasks/:id/resume` → `{"resumed":true}`；
+`POST /api/v1/tasks/:id/mark-failed` → `{"marked":true}`。
+
+仅 `interrupted` 状态可调用（否则 400）；审计员 403、范围外 403。
+resume 使任务回到 `pending` 并异步续跑；mark-failed 直接写 `failed` 终态并结算项目批次。
+
+### 10.5 移除任务
+
+`DELETE /api/v1/tasks/:id` → `{"deleted":true}`。仅终态（含 `interrupted`，视为放弃恢复）；
+发布者限本人，管理员不受限；步骤日志与脚本快照一并删除，入 `task.delete` 审计。
 
 ## 11. 审计接口
 
