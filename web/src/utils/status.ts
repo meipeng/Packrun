@@ -5,6 +5,7 @@ const map: Record<string, { label: string; type: TagType }> = {
   uploading: { label: '上传中', type: 'primary' },
   verifying: { label: '校验中', type: 'warning' },
   executing: { label: '执行中', type: 'warning' },
+  interrupted: { label: '待恢复', type: 'danger' },
   success: { label: '成功', type: 'success' },
   failed: { label: '失败', type: 'danger' },
   canceled: { label: '已取消', type: 'info' },
@@ -27,6 +28,11 @@ export function envMeta(env: string) {
 
 export function isRunning(status: string) {
   return ['pending', 'uploading', 'verifying', 'executing'].includes(status)
+}
+
+/** 重启中断待恢复：可人工「继续执行」（跳过已完成步骤）或「标记失败」 */
+export function isInterrupted(status: string) {
+  return status === 'interrupted'
 }
 
 export function formatSize(bytes: number) {

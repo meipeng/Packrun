@@ -130,6 +130,7 @@ const drawer = reactive({
     owner: 'app',
     allowOverwrite: true,
     backupBeforeDeploy: true,
+    cleanReplace: false,
     packageMode: 'unpack',
     keepReleases: 3,
     maxSizeMB: 512,
@@ -311,7 +312,7 @@ async function remove(row: Server) {
 async function openDirs(row: Server) {
   drawer.server = row
   drawer.visible = true
-  drawer.form = { id: 0, path: '', owner: 'app', allowOverwrite: true, backupBeforeDeploy: true, packageMode: 'unpack', keepReleases: 3, maxSizeMB: 512, remark: '' }
+  drawer.form = { id: 0, path: '', owner: 'app', allowOverwrite: true, backupBeforeDeploy: true, cleanReplace: false, packageMode: 'unpack', keepReleases: 3, maxSizeMB: 512, remark: '' }
   await loadDirs()
 }
 
@@ -325,11 +326,11 @@ async function loadDirs() {
 }
 
 function editDir(d: Directory) {
-  drawer.form = { ...d, packageMode: d.packageMode || 'unpack' }
+  drawer.form = { ...d, cleanReplace: !!d.cleanReplace, packageMode: d.packageMode || 'unpack' }
 }
 
 function resetDir() {
-  drawer.form = { id: 0, path: '', owner: 'app', allowOverwrite: true, backupBeforeDeploy: true, packageMode: 'unpack', keepReleases: 3, maxSizeMB: 512, remark: '' }
+  drawer.form = { id: 0, path: '', owner: 'app', allowOverwrite: true, backupBeforeDeploy: true, cleanReplace: false, packageMode: 'unpack', keepReleases: 3, maxSizeMB: 512, remark: '' }
 }
 
 async function saveDir() {
@@ -732,6 +733,7 @@ onMounted(() => load())
             <div class="policy">
               <span>{{ row.allowOverwrite ? '可覆盖' : '仅新增' }}</span>
               <span>{{ row.backupBeforeDeploy ? '部署前备份' : '不备份' }}</span>
+              <span v-if="row.cleanReplace">干净替换</span>
               <span>{{ row.packageMode === 'upload' ? '仅上传压缩包' : '自动解压' }}</span>
             </div>
           </template>
@@ -758,6 +760,10 @@ onMounted(() => load())
         </el-form-item>
         <el-form-item label="备份策略">
           <el-switch v-model="drawer.form.backupBeforeDeploy" active-text="部署前备份" inactive-text="不备份" />
+        </el-form-item>
+        <el-form-item label="干净替换">
+          <el-switch v-model="drawer.form.cleanReplace" active-text="开启" inactive-text="关闭" />
+          <div class="form-tip">开启后 zip 自动解压时清理包内不存在的旧文件（仅限部署目录内），实现完整替换发布。</div>
         </el-form-item>
         <el-form-item label="包处理">
           <el-radio-group v-model="drawer.form.packageMode">

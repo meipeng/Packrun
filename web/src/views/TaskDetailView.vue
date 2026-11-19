@@ -3,9 +3,9 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
-import { taskApi, type Task, type TaskScriptSnapshot, type TaskStep } from '@/api'
+import { taskApi, type Task, type TaskManifest, type TaskScriptSnapshot, type TaskStep } from '@/api'
 import { useAuthStore } from '@/stores/auth'
-import { isRunning, statusMeta } from '@/utils/status'
+import { isInterrupted, isRunning, statusMeta } from '@/utils/status'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +19,16 @@ const loading = ref(true)
 let timer: number | undefined
 
 const running = computed(() => (task.value ? isRunning(task.value.status) : false))
+const interrupted = computed(() => (task.value ? isInterrupted(task.value.status) : false))
+
+const manifest = computed<TaskManifest | null>(() => {
+  if (!task.value?.manifest) return null
+  try {
+    return JSON.parse(task.value.manifest) as TaskManifest
+  } catch {
+    return null
+  }
+})
 
 const duration = computed(() => {
   if (!task.value?.startedAt) return '—'
@@ -47,6 +57,13 @@ function stopPolling() {
   if (timer) {
     window.clearInterval(timer)
     timer = undefined
+  }
+}
+
+function startPolling() {
+  stopPolling()
+  if (running.value) {
+    timer = window.setInterval(load, 2000)
   }
 }
 
@@ -85,11 +102,42 @@ function stepType(status: string) {
   return status === 'success' ? 'success' : status === 'failed' ? 'danger' : status === 'running' ? 'primary' : 'info'
 }
 
+// 继续执行中断任务：上次已成功的步骤自动跳过，从中断处继续。
+async function resume() {
+  try {
+    await ElMessageBox.confirm(
+      '确认继续执行该任务？已完成步骤将自动跳过，校验类步骤会重新执行。',
+      '继续执行',
+      { type: 'warning' },
+    )
+    await taskApi.resume(id)
+    ElMessage.success('任务已重新入队')
+    load()
+    startPolling()
+  } catch (e: any) {
+    if (e !== 'cancel') ElMessage.error(e.message || '恢复失败')
+  }
+}
+
+// 放弃续跑：把中断任务标记为失败收口。
+async function markFailed() {
+  try {
+    await ElMessageBox.confirm(
+      '确认放弃续跑并把该任务标记为失败？目标目录可能残留半成品，建议先人工核对。',
+      '标记失败',
+      { type: 'warning', confirmButtonText: '标记失败', confirmButtonClass: 'el-button--danger' },
+    )
+    await taskApi.markFailed(id)
+    ElMessage.success('已标记为失败')
+    load()
+  } catch (e: any) {
+    if (e !== 'cancel') ElMessage.error(e.message || '操作失败')
+  }
+}
+
 onMounted(async () => {
   await load()
-  if (running.value) {
-    timer = window.setInterval(load, 2000)
-  }
+  startPolling()
 })
 
 onBeforeUnmount(stopPolling)
@@ -112,7 +160,9 @@ onBeforeUnmount(stopPolling)
       </div>
       <div class="actions">
         <el-button :icon="Refresh" @click="load">刷新</el-button>
-        <el-button v-if="task && !running && auth.canDeploy" type="danger" plain @click="removeTask">移除任务</el-button>
+        <el-button v-if="interrupted && auth.canDeploy" type="primary" @click="resume">继续执行</el-button>
+        <el-button v-if="interrupted && auth.canDeploy" type="warning" plain @click="markFailed">标记失败</el-button>
+        <el-button v-if="task && !running && !interrupted && auth.canDeploy" type="danger" plain @click="removeTask">移除任务</el-button>
         <el-button v-if="task && running && auth.canDeploy" type="danger" plain @click="cancel">取消任务</el-button>
       </div>
     </div>
@@ -146,6 +196,18 @@ onBeforeUnmount(stopPolling)
             <span class="pr-mono">{{ task.stage }} · {{ task.progress }}%</span>
           </div>
           <el-progress :percentage="task.progress" :status="task.status === 'failed' ? 'exception' : undefined" :stroke-width="10" />
+        </div>
+
+        <div class="manifest-box" v-if="manifest">
+          <div class="card-title" style="margin-top: 20px">发布差异清单</div>
+          <div class="manifest-stats">
+            <span>包内文件 {{ manifest.totalEntries }}</span>
+            <span class="added">新增 {{ manifest.added }}</span>
+            <span>覆盖 {{ manifest.overwritten }}</span>
+            <span class="removed">清理旧文件 {{ manifest.removed?.length || 0 }}{{ manifest.truncated ? '+' : '' }}</span>
+            <el-tag v-if="manifest.cleanReplace" size="small" effect="plain">干净替换</el-tag>
+          </div>
+          <pre v-if="manifest.removed?.length" class="pr-log">{{ manifest.removed.join('\n') }}</pre>
         </div>
       </div>
 
@@ -227,6 +289,27 @@ onBeforeUnmount(stopPolling)
 
 .progress-box {
   margin-top: 20px;
+}
+
+.manifest-box {
+  margin-top: 20px;
+}
+
+.manifest-stats {
+  display: flex;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--pr-sub);
+  margin-bottom: 8px;
+  align-items: center;
+}
+
+.manifest-stats .added {
+  color: var(--el-color-success);
+}
+
+.manifest-stats .removed {
+  color: var(--el-color-danger);
 }
 
 .progress-label {

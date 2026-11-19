@@ -64,6 +64,8 @@ func NewRouter(app *App) *gin.Engine {
 		authed.GET("/tasks/:id", app.getTask)
 		authed.POST("/tasks", app.createTask)
 		authed.POST("/tasks/:id/cancel", app.cancelTask)
+		authed.POST("/tasks/:id/resume", app.resumeTask)
+		authed.POST("/tasks/:id/mark-failed", app.markTaskFailed)
 		authed.DELETE("/tasks/:id", app.deleteTask)
 	}
 

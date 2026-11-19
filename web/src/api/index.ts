@@ -84,6 +84,8 @@ export interface Directory {
   owner: string
   allowOverwrite: boolean
   backupBeforeDeploy: boolean
+  /** 干净替换：zip 解包时清理包内不存在的旧文件 */
+  cleanReplace: boolean
   packageMode: 'unpack' | 'upload' | string
   keepReleases: number
   maxSizeMB: number
@@ -136,9 +138,21 @@ export interface Task {
   progress: number
   message: string
   otpVerified: boolean
+  /** zip 发布的文件级差异清单 JSON（TaskManifest），非 zip 发布为空 */
+  manifest: string
   startedAt?: string
   finishedAt?: string
   createdAt: string
+}
+
+/** zip 发布的文件级差异：随任务落库，任务详情展示 */
+export interface TaskManifest {
+  totalEntries: number
+  added: number
+  overwritten: number
+  removed?: string[]
+  truncated?: boolean
+  cleanReplace: boolean
 }
 
 export interface TaskStep {
@@ -229,6 +243,8 @@ export interface ProjectDir {
   owner: string
   allowOverwrite: boolean
   backupBeforeDeploy: boolean
+  /** 干净替换：zip 解包时清理包内不存在的旧文件 */
+  cleanReplace: boolean
   packageMode: 'unpack' | 'upload' | string
   keepReleases: number
   maxSizeMB: number
@@ -407,6 +423,8 @@ export const taskApi = {
     otp?: string
   }) => post<Task>('/tasks', data),
   cancel: (id: number) => post<{ canceled: boolean }>(`/tasks/${id}/cancel`),
+  resume: (id: number) => post<{ resumed: boolean }>(`/tasks/${id}/resume`, {}),
+  markFailed: (id: number) => post<{ marked: boolean }>(`/tasks/${id}/mark-failed`, {}),
   remove: (id: number) => del<{ deleted: boolean }>(`/tasks/${id}`),
 }
 

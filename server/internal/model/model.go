@@ -153,6 +153,7 @@ type Directory struct {
 	Owner              string    `gorm:"size:64" json:"owner"`
 	AllowOverwrite     bool      `json:"allowOverwrite"`
 	BackupBeforeDeploy bool      `json:"backupBeforeDeploy"`
+	CleanReplace       bool      `json:"cleanReplace"` // 干净替换：zip 解包时清理包内不存在的旧文件（仅限部署目录内）
 	PackageMode        string    `gorm:"size:16;default:unpack" json:"packageMode"` // unpack | upload，仅对 zip 生效
 	KeepReleases       int       `gorm:"default:3" json:"keepReleases"`
 	MaxSizeMB          int       `gorm:"default:1024" json:"maxSizeMB"`

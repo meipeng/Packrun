@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -305,6 +306,33 @@ func (a *App) runTask(id uint) {
 	a.Sessions.add(id, cancel)
 	defer a.Sessions.remove(id)
 
+	// 续跑识别：已有步骤记录说明是中断后的恢复执行（收口手册 §21.6）。
+	// 「上次已成功」的步骤本次跳过；校验类步骤始终重新执行。
+	var skipSteps map[string]bool
+	var stepCount int64
+	a.DB.Model(&model.TaskStep{}).Where("task_id = ?", id).Count(&stepCount)
+	seq := int(stepCount) + 1
+	if stepCount > 0 {
+		skipSteps = map[string]bool{}
+		var done []model.TaskStep
+		a.DB.Where("task_id = ? AND status = ?", id, "success").Order("seq asc").Find(&done)
+		skipNames := make([]string, 0, len(done))
+		for _, st := range done {
+			if _, seen := skipSteps[st.Name]; !seen {
+				skipSteps[st.Name] = true
+				skipNames = append(skipNames, st.Name)
+			}
+		}
+		// 续跑说明落进时间线：跳过清单可见
+		ts := time.Now()
+		note := model.TaskStep{TaskID: id, Seq: seq, Name: "续跑校验", Status: "success", StartedAt: &ts, FinishedAt: &ts}
+		note.Output = fmt.Sprintf("检测到上次执行中断，续跑跳过已完成步骤：%s", strings.Join(skipNames, "、"))
+		a.DB.Create(&note)
+		seq++
+		a.DB.Model(&model.Task{}).Where("id = ?", id).
+			Update("message", "人工恢复执行，跳过已完成步骤："+strings.Join(skipNames, "、"))
+	}
+
 	var dir model.Directory
 	var pkg model.Package
 	if err := a.DB.First(&dir, task.DirectoryID).Error; err != nil {
@@ -336,7 +364,6 @@ func (a *App) runTask(id uint) {
 	var mu sync.Mutex
 	var current *model.TaskStep
 	var currentLog *stepLog
-	seq := 1
 
 	hooks := deploy.Hooks{
 		OnStep: func(name string) {
@@ -377,10 +404,14 @@ func (a *App) runTask(id uint) {
 		},
 	}
 
+	var manifest deploy.Manifest
 	req := deploy.Request{
 		Server: srv, Directory: dir, Package: pkg, PreScript: preScript, Script: script,
 		SourcePath: filepath.Join(a.Cfg.Storage.PackageDir, pkg.StorageKey),
 		Hooks:      hooks,
+		TaskRef:    task.TaskNo,
+		SkipSteps:  skipSteps,
+		Manifest:   &manifest,
 	}
 
 	err := a.Deployer.Deploy(ctx, req)
@@ -398,6 +429,11 @@ func (a *App) runTask(id uint) {
 
 	switch {
 	case err == nil:
+		if manifest.TotalEntries > 0 {
+			if b, mErr := json.Marshal(manifest); mErr == nil {
+				a.DB.Model(&model.Task{}).Where("id = ?", id).Update("manifest", string(b))
+			}
+		}
 		a.finishTask(id, model.TaskSuccess, "部署完成", nil)
 	case ctx.Err() != nil:
 		a.finishTask(id, model.TaskCanceled, "任务已取消", nil)
@@ -523,6 +559,10 @@ func (a *App) cancelTask(c *gin.Context) {
 		ok(c, gin.H{"canceled": true})
 		return
 	}
+	if task.Status == model.TaskInterrupted {
+		badRequest(c, "任务已因服务重启中断待恢复，请选择「继续执行」或「标记失败」")
+		return
+	}
 	if a.Sessions.cancel(task.ID) {
 		a.audit(c, "task.cancel", task.TaskNo, "ok", task.TaskNo, "执行中被取消", task.OTPVerified)
 		ok(c, gin.H{"canceled": true})
@@ -555,9 +595,9 @@ func (a *App) deleteTask(c *gin.Context) {
 		return
 	}
 	switch task.Status {
-	case model.TaskSuccess, model.TaskFailed, model.TaskCanceled:
+	case model.TaskSuccess, model.TaskFailed, model.TaskCanceled, model.TaskInterrupted:
 	default:
-		badRequest(c, "任务仍在进行中，请先取消再移除")
+		badRequest(c, "任务仍在进行中，请先取消或恢复处理再移除")
 		return
 	}
 	if err := a.DB.Where("task_id = ?", task.ID).Delete(&model.TaskStep{}).Error; err != nil {
@@ -574,6 +614,60 @@ func (a *App) deleteTask(c *gin.Context) {
 	}
 	a.audit(c, "task.delete", task.TaskNo, "ok", task.TaskNo, "移除已结束任务记录", task.OTPVerified)
 	ok(c, gin.H{"deleted": true})
+}
+
+// ---------- 中断恢复 ----------
+
+// requireInterruptionHandler 校验任务处于「待恢复」状态且调用者有权处置。
+// 返回任务与是否通过校验；审计角色与越权范围直接拒绝。
+func (a *App) requireInterruptionHandler(c *gin.Context) (*model.Task, *model.User, bool) {
+	u := currentUser(c)
+	if u.Role == model.RoleAuditor {
+		forbidden(c, "审计角色不可处置中断任务")
+		return nil, nil, false
+	}
+	id, _ := strconv.Atoi(c.Param("id"))
+	var task model.Task
+	if err := a.DB.First(&task, id).Error; err != nil {
+		notFound(c, "任务不存在")
+		return nil, nil, false
+	}
+	if !checkServerScope(u, task.ServerID) {
+		forbidden(c, "无权处置该任务")
+		return nil, nil, false
+	}
+	if task.Status != model.TaskInterrupted {
+		badRequest(c, "只有「待恢复」状态的任务可以继续执行或标记失败")
+		return nil, nil, false
+	}
+	return &task, u, true
+}
+
+// resumeTask 人工恢复一个重启中断的任务：重新入队执行，
+// 上次已成功的步骤自动跳过，校验类步骤重新执行。
+func (a *App) resumeTask(c *gin.Context) {
+	task, _, pass := a.requireInterruptionHandler(c)
+	if !pass {
+		return
+	}
+	a.DB.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+		"status": model.TaskPending, "stage": "queued", "progress": 0,
+		"message": "人工恢复，重新排队执行（已完成步骤自动跳过）", "finished_at": nil,
+	})
+	a.audit(c, "task.resume", task.TaskNo, "ok", task.TaskNo, "人工恢复中断任务，重新入队", task.OTPVerified)
+	go a.runTask(task.ID)
+	ok(c, gin.H{"resumed": true})
+}
+
+// markTaskFailed 把重启中断的任务人工标记为失败收口，用于放弃续跑的场景。
+func (a *App) markTaskFailed(c *gin.Context) {
+	task, _, pass := a.requireInterruptionHandler(c)
+	if !pass {
+		return
+	}
+	a.finishTask(task.ID, model.TaskFailed, "人工确认：中断任务不再续跑，标记为失败", nil)
+	a.audit(c, "task.markfailed", task.TaskNo, "ok", task.TaskNo, "中断任务人工标记失败", task.OTPVerified)
+	ok(c, gin.H{"marked": true})
 }
 
 // ---------- 概览 ----------
@@ -623,29 +717,48 @@ func (a *App) overview(c *gin.Context) {
 	})
 }
 
-// RecoverInterruptedTasks 把上次进程中断时未完成的任务收口为失败，
-// 避免重启后任务永久停留在 uploading / executing 状态。
-func RecoverInterruptedTasks(db *gorm.DB) int {
-	running := []string{model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting}
+// RecoverInterruptedTasks 上次进程中断的启动收口：
+//   - 已开始执行（uploading/verifying/executing）→ interrupted 待恢复，
+//     等待人工「继续执行」或「标记失败」，不再一律判失败；
+//   - 仍在排队（pending）→ 保持不变，返回 ID 列表由装配层在服务就绪后重新入队。
+//
+// 返回（待重新入队的任务 ID 列表, 中断收口条数）。
+func RecoverInterruptedTasks(db *gorm.DB) ([]uint, int) {
 	var tasks []model.Task
-	if err := db.Where("status IN ?", running).Find(&tasks).Error; err != nil {
+	if err := db.Where("status IN ?", []string{model.TaskUploading, model.TaskVerifying, model.TaskExecuting}).
+		Find(&tasks).Error; err != nil {
 		log.Printf("[recover] 查询未完成任务失败: %v", err)
-		return 0
+		return nil, 0
+	}
+
+	var pendingIDs []uint
+	if err := db.Model(&model.Task{}).Where("status = ?", model.TaskPending).
+		Order("id asc").Pluck("id", &pendingIDs).Error; err != nil {
+		log.Printf("[recover] 查询排队任务失败: %v", err)
+		pendingIDs = nil
 	}
 
 	now := time.Now()
 	for _, task := range tasks {
 		db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
-			"status": model.TaskFailed, "message": "服务重启，任务执行中断", "finished_at": now,
+			"status": model.TaskInterrupted,
+			"message": "服务重启，任务执行中断；可在任务详情选择「继续执行」或「标记失败」",
 		})
 		db.Model(&model.TaskStep{}).Where("task_id = ? AND status = ?", task.ID, "running").
 			Updates(map[string]any{"status": "failed", "finished_at": now})
 		db.Create(&model.AuditLog{
 			Actor: "system", Action: "task.recover", Target: task.ServerName + ":" + task.TargetPath,
-			Result: "fail", TaskNo: task.TaskNo, Detail: "服务重启，任务被标记为中断失败",
+			Result: "fail", TaskNo: task.TaskNo, Detail: "服务重启，任务进入待恢复状态",
 		})
 	}
-	return len(tasks)
+	return pendingIDs, len(tasks)
+}
+
+// RequeuePendingTasks 进程重启后重新入队仍在排队的任务（从未开始执行，无恢复语义）。
+func RequeuePendingTasks(app *App, ids []uint) {
+	for _, id := range ids {
+		go app.runTask(id)
+	}
 }
 
 func orNone(v string) string {

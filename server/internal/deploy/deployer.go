@@ -55,6 +55,28 @@ type Request struct {
 	Script     *model.Script // 后置脚本，解包后执行
 	SourcePath string        // 中控机上的包文件绝对路径
 	Hooks      Hooks
+
+	// TaskRef 任务号（如 D20261119…）：目标机临时文件按它命名，续跑时可定位上次产物。可为空。
+	TaskRef string
+	// SkipSteps 续跑时需要跳过的步骤名集合（上次已成功的阶段）；nil 表示全新执行。
+	// 校验类步骤（校验安装包）不受此集合控制，始终重新执行。
+	SkipSteps map[string]bool
+	// Manifest 非 nil 时，zip 解包完成后回填文件级差异清单，供任务记录落库展示。
+	Manifest *Manifest
+}
+
+// skip 判断指定步骤是否应跳过。
+func (r *Request) skip(name string) bool {
+	return r.SkipSteps[name]
+}
+
+// beginStep 打开时间线步骤；续跑跳过的步骤不开新行，只留一条说明日志。
+func (r *Request) beginStep(name string) {
+	if r.skip(name) {
+		r.Hooks.logf("续跑：步骤「" + name + "」上次已完成，本次跳过")
+		return
+	}
+	r.Hooks.step(name)
 }
 
 // Deployer 抽象执行通道：SSH 与未来内部 RPC 均实现此接口。

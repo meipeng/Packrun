@@ -46,39 +46,54 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) (retErr error) 
 	maxBytes, maxEntries := unpackBudget(req)
 
 	// 1. 准备目录
-	req.Hooks.step(StepPrepare)
+	req.beginStep(StepPrepare)
 	req.Hooks.stage("prepare", 10)
-	req.Hooks.logf(fmt.Sprintf("目标目录：%s", target))
-	if err := d.sleep(ctx); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
-	}
+	if req.skip(StepPrepare) {
+		// 续跑：目录上次已就绪
+	} else {
+		req.Hooks.logf(fmt.Sprintf("目标目录：%s", target))
+		if err := d.sleep(ctx); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return fmt.Errorf("创建目录失败: %w", err)
+		}
 
-	// 空间阈值：目标目录已占用超过策略上限时，拒绝本次部署
-	if mb, err := dirSizeMB(target); err != nil {
-		return fmt.Errorf("统计目录占用失败: %w", err)
-	} else if req.Directory.MaxSizeMB > 0 && mb > int64(req.Directory.MaxSizeMB) {
-		return fmt.Errorf("目标目录已占用 %d MB，超过阈值 %d MB", mb, req.Directory.MaxSizeMB)
-	} else if req.Directory.MaxSizeMB > 0 {
-		req.Hooks.logf(fmt.Sprintf("目录占用 %d MB / 阈值 %d MB", mb, req.Directory.MaxSizeMB))
+		// 空间阈值：目标目录已占用超过策略上限时，拒绝本次部署
+		if mb, err := dirSizeMB(target); err != nil {
+			return fmt.Errorf("统计目录占用失败: %w", err)
+		} else if req.Directory.MaxSizeMB > 0 && mb > int64(req.Directory.MaxSizeMB) {
+			return fmt.Errorf("目标目录已占用 %d MB，超过阈值 %d MB", mb, req.Directory.MaxSizeMB)
+		} else if req.Directory.MaxSizeMB > 0 {
+			req.Hooks.logf(fmt.Sprintf("目录占用 %d MB / 阈值 %d MB", mb, req.Directory.MaxSizeMB))
+		}
 	}
 
 	// 2. 前置校验
 	if req.PreScript != nil {
-		req.Hooks.step(StepPreCheck)
+		req.beginStep(StepPreCheck)
 		req.Hooks.stage("precheck", 15)
-		previewScript(req.Hooks, req.PreScript)
-		if err := d.sleep(ctx); err != nil {
-			return err
+		if !req.skip(StepPreCheck) {
+			previewScript(req.Hooks, req.PreScript)
+			if err := d.sleep(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
 	// 3. 备份
-	req.Hooks.step(StepBackup)
 	req.Hooks.stage("backup", 25)
-	if req.Directory.BackupBeforeDeploy {
+	switch {
+	case req.skip(StepBackup):
+		// 续跑：沿用上次执行创建的最近备份，失败自动恢复仍可用
+		if p, ok := newestLocalBackup(target); ok {
+			backupPath = p
+			req.Hooks.logf("续跑：沿用最近一次备份 " + filepath.Base(p))
+		} else {
+			req.Hooks.logf("续跑：无既有备份可沿用（上次执行时目录为空或策略未开启备份）")
+		}
+	case req.Directory.BackupBeforeDeploy:
+		req.Hooks.step(StepBackup)
 		if entries, _ := os.ReadDir(target); len(entries) > 0 {
 			backup := target + ".bak-" + time.Now().Format("20060102150405")
 			if err := os.Rename(target, backup); err != nil {
@@ -92,26 +107,38 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) (retErr error) 
 		} else {
 			req.Hooks.logf("目标目录为空，跳过备份")
 		}
-	} else {
+	default:
+		req.Hooks.step(StepBackup)
 		req.Hooks.logf("目录策略未开启备份，跳过")
 	}
 	if err := d.sleep(ctx); err != nil {
 		return err
 	}
 
-	// 4. 上传
-	req.Hooks.step(StepUpload)
+	// 4. 上传（临时文件名确定，续跑时若已存在则复用）
 	req.Hooks.stage("upload", 45)
 	tmp := filepath.Join(target, ".incoming-"+req.Package.Name)
-	if err := copyFile(req.SourcePath, tmp); err != nil {
-		return fmt.Errorf("写入安装包失败: %w", err)
+	reuseUpload := false
+	if req.skip(StepUpload) {
+		if info, err := os.Stat(tmp); err == nil && info.Mode().IsRegular() && info.Size() == req.Package.Size {
+			reuseUpload = true
+			req.Hooks.logf("续跑：安装包在上次尝试中已写入，复用 " + filepath.Base(tmp))
+		} else {
+			req.Hooks.logf("续跑：上次写入的临时包已不存在，重新写入")
+		}
 	}
-	req.Hooks.logf(fmt.Sprintf("已写入 %s（%d 字节）", req.Package.Name, req.Package.Size))
+	if !reuseUpload {
+		req.Hooks.step(StepUpload)
+		if err := copyFile(req.SourcePath, tmp); err != nil {
+			return fmt.Errorf("写入安装包失败: %w", err)
+		}
+		req.Hooks.logf(fmt.Sprintf("已写入 %s（%d 字节）", req.Package.Name, req.Package.Size))
+	}
 	if err := d.sleep(ctx); err != nil {
 		return err
 	}
 
-	// 5. 校验
+	// 5. 校验（续跑时也重新执行：确认复用的包文件仍然完整）
 	req.Hooks.step(StepVerify)
 	req.Hooks.stage("verify", 60)
 	sum, err := fileSHA256(tmp)
@@ -127,9 +154,41 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) (retErr error) 
 	}
 
 	// 6. 解包/替换
-	req.Hooks.step(StepUnpack)
+	req.beginStep(StepUnpack)
 	req.Hooks.stage("unpack", 75)
-	if req.Package.Kind == "zip" && req.Directory.PackageMode != model.PackageModeUpload {
+	if req.skip(StepUnpack) {
+		// 续跑：上次解包已完整完成
+	} else if req.Package.Kind == "zip" && req.Directory.PackageMode != model.PackageModeUpload {
+		entries, err := zipEntries(tmp)
+		if err != nil {
+			return err
+		}
+		// 文件级差异与目录策略约束（收口手册 §21.1）：与 SSH 执行器同一套语义
+		if req.Manifest != nil || req.Directory.CleanReplace || !req.Directory.AllowOverwrite {
+			existing, ok := listLocalExistingFiles(target)
+			if !ok && (req.Directory.CleanReplace || !req.Directory.AllowOverwrite) {
+				return fmt.Errorf("无法列出目标目录现有文件，为避免误删或误判冲突，已拒绝本次发布")
+			}
+			if ok {
+				added, overwritten, stale := diffManifest(existing, entries)
+				if !req.Directory.AllowOverwrite && overwritten > 0 {
+					return fmt.Errorf("目录策略为「仅新增」，包内 %d 个文件已存在（如 %s），已拒绝解压",
+						overwritten, intersectEntries(existing, entries)[0])
+				}
+				if req.Directory.CleanReplace && len(stale) > 0 {
+					if n := removeLocalFiles(target, stale); n > 0 {
+						req.Hooks.logf(fmt.Sprintf("干净替换：已清理 %d 个包内不存在的旧文件", n))
+					}
+				}
+				if req.Manifest != nil {
+					*req.Manifest = Manifest{
+						TotalEntries: len(entries), Added: added, Overwritten: overwritten,
+						CleanReplace: req.Directory.CleanReplace,
+					}
+					req.Manifest.applyManifestLimits(stale)
+				}
+			}
+		}
 		n, err := unzip(tmp, target, maxBytes, maxEntries)
 		if err != nil {
 			return err
@@ -157,11 +216,14 @@ func (d *LocalDeployer) Deploy(ctx context.Context, req Request) (retErr error) 
 	}
 
 	// 7. 后置脚本
-	req.Hooks.step(StepScript)
+	req.beginStep(StepScript)
 	req.Hooks.stage("script", 90)
-	if req.Script == nil {
+	switch {
+	case req.skip(StepScript):
+		// 续跑：上次已执行成功
+	case req.Script == nil:
 		req.Hooks.logf("未绑定部署后脚本，跳过")
-	} else {
+	default:
 		previewScript(req.Hooks, req.Script)
 	}
 	if err := d.sleep(ctx); err != nil {
@@ -192,6 +254,87 @@ func previewScript(h Hooks, script *model.Script) {
 		h.logf("  | " + line)
 	}
 	h.logf("本地沙箱模式：脚本仅回显，未实际执行（切换 deploy.mode=ssh 后由目标机执行）")
+}
+
+// newestLocalBackup 返回 target 最近一个 .bak-* 备份目录（续跑时沿用）；不存在时 ok=false。
+func newestLocalBackup(target string) (string, bool) {
+	parent := filepath.Dir(target)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return "", false
+	}
+	prefix := filepath.Base(target) + ".bak-"
+	best := ""
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), prefix) && e.Name() > best {
+			best = e.Name()
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return filepath.Join(parent, best), true
+}
+
+// listLocalExistingFiles 列出目标目录内的相对文件路径（正斜杠分隔）。
+// 排除本执行器的 .incoming-* 临时文件；文件数超上限或遍历失败时 ok=false。
+func listLocalExistingFiles(target string) ([]string, bool) {
+	var files []string
+	walkErr := filepath.WalkDir(target, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(entry.Name(), ".incoming-") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(target, path)
+		if relErr != nil {
+			return nil
+		}
+		files = append(files, filepath.ToSlash(rel))
+		return nil
+	})
+	if walkErr != nil || len(files) > maxTrackedFiles {
+		return nil, false
+	}
+	return files, true
+}
+
+// removeLocalFiles 删除目标目录内包中不存在的旧文件（干净替换），返回删除数量。
+// 逐条校验相对路径安全（无 .. 穿越、不越界），防御性兜底。
+func removeLocalFiles(target string, files []string) int {
+	cleanTarget := filepath.Clean(target)
+	removed := 0
+	for _, f := range files {
+		if f == "" || strings.HasPrefix(f, "/") || containsPathTraversal(f) {
+			continue
+		}
+		dst := filepath.Join(target, filepath.FromSlash(f))
+		if !withinRoot(cleanTarget, dst) {
+			continue
+		}
+		if err := os.Remove(dst); err == nil {
+			removed++
+		}
+	}
+	return removed
+}
+
+// zipEntries 读取压缩包内的文件条目（不含目录）。
+func zipEntries(path string) ([]string, error) {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, fmt.Errorf("读取压缩包失败: %w", err)
+	}
+	defer r.Close()
+	entries := make([]string, 0, len(r.File))
+	for _, f := range r.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		entries = append(entries, f.Name)
+	}
+	return entries, nil
 }
 
 func (d *LocalDeployer) resolveTarget(req Request) (string, error) {

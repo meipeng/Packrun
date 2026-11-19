@@ -466,6 +466,7 @@ type directoryReq struct {
 	Owner              string `json:"owner"`
 	AllowOverwrite     bool   `json:"allowOverwrite"`
 	BackupBeforeDeploy bool   `json:"backupBeforeDeploy"`
+	CleanReplace       bool   `json:"cleanReplace"` // 干净替换：zip 解包时清理包内不存在的旧文件
 	PackageMode        string `json:"packageMode"`
 	KeepReleases       int    `json:"keepReleases"`
 	MaxSizeMB          int    `json:"maxSizeMB"`
@@ -517,6 +518,7 @@ func (a *App) createDirectory(c *gin.Context) {
 	dir := model.Directory{
 		ServerID: req.ServerID, Path: path, Owner: req.Owner,
 		AllowOverwrite: req.AllowOverwrite, BackupBeforeDeploy: req.BackupBeforeDeploy,
+		CleanReplace: req.CleanReplace,
 		PackageMode:  packageMode,
 		KeepReleases: req.KeepReleases, MaxSizeMB: req.MaxSizeMB, Remark: req.Remark,
 	}
@@ -547,8 +549,9 @@ func (a *App) updateDirectory(c *gin.Context) {
 	}
 	updates := map[string]any{
 		"path": path, "owner": req.Owner, "allow_overwrite": req.AllowOverwrite,
-		"backup_before_deploy": req.BackupBeforeDeploy, "keep_releases": req.KeepReleases,
-		"max_size_mb": req.MaxSizeMB, "remark": req.Remark,
+		"backup_before_deploy": req.BackupBeforeDeploy, "clean_replace": req.CleanReplace,
+		"keep_releases": req.KeepReleases,
+		"max_size_mb":   req.MaxSizeMB, "remark": req.Remark,
 	}
 	// 旧客户端不提交 packageMode 时保持原值，避免误重置。
 	if strings.TrimSpace(req.PackageMode) != "" {

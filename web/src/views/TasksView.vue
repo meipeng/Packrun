@@ -91,6 +91,7 @@ onMounted(load)
           <el-option label="上传中" value="uploading" />
           <el-option label="校验中" value="verifying" />
           <el-option label="执行中" value="executing" />
+          <el-option label="待恢复" value="interrupted" />
           <el-option label="成功" value="success" />
           <el-option label="失败" value="failed" />
           <el-option label="已取消" value="canceled" />

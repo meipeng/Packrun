@@ -47,8 +47,9 @@ func main() {
 	if err := store.Seed(db, cfg); err != nil {
 		log.Fatalf("初始化基础数据失败: %v", err)
 	}
-	if n := api.RecoverInterruptedTasks(db); n > 0 {
-		log.Printf("[recover] %d 个未完成任务已标记为中断失败", n)
+	pendingTaskIDs, interrupted := api.RecoverInterruptedTasks(db)
+	if interrupted > 0 {
+		log.Printf("[recover] %d 个任务因重启中断进入待恢复状态，可在任务页「继续执行」或「标记失败」", interrupted)
 	}
 
 	delay := time.Duration(cfg.Deploy.StepDelayMS) * time.Millisecond
@@ -93,6 +94,11 @@ func main() {
 
 	gin.SetMode(cfg.Server.Mode)
 	app := api.NewApp(cfg, db, executor)
+	// 排队任务从未开始执行，服务就绪后直接重新入队
+	if len(pendingTaskIDs) > 0 {
+		log.Printf("[recover] %d 个排队任务重新入队", len(pendingTaskIDs))
+		api.RequeuePendingTasks(app, pendingTaskIDs)
+	}
 
 	// 后台指标采集：定时拉取各服务器负载/内存/磁盘快照，仅在 SSH 模式下开启。
 	if cfg.Deploy.Mode == "ssh" {

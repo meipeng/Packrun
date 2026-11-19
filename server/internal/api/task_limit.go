@@ -9,13 +9,14 @@ import (
 // pendingTaskFallbackLimit 配置缺失或非正数时使用的单用户待执行任务上限。
 const pendingTaskFallbackLimit = 10
 
-// pendingTaskStates 视为「待执行」的任务状态。
+// pendingTaskStates 未终态任务集合：配额、项目批次运行中判断与脚本引用提示共用。
+// 重启中断的「待恢复」任务同样占用未终态配额，需人工继续或标记失败后释放。
 var pendingTaskStates = []string{
-	model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting,
+	model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting, model.TaskInterrupted,
 }
 
-// unfinishedTaskStates 所有未终态状态：配额、项目批次运行中判断与脚本引用提示共用。
-var unfinishedTaskStates = append(pendingTaskStates, model.TaskInterrupted)
+// unfinishedTaskStates 与 pendingTaskStates 同源，语义化别名。
+var unfinishedTaskStates = pendingTaskStates
 
 func (a *App) pendingTaskLimit() int {
 	if a.Cfg == nil || a.Cfg.Deploy.MaxPendingPerUser <= 0 {

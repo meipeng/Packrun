@@ -486,13 +486,11 @@ type rollbackReq struct {
 	OTP     string `json:"otp"`
 }
 
-const batchRunningStates = "'" + model.TaskPending + "','" + model.TaskUploading + "','" + model.TaskVerifying + "','" + model.TaskExecuting + "'"
-
-// projectHasRunningBatch 项目是否仍有进行中的发布批次。
+// projectHasRunningBatch 项目是否仍有进行中的发布批次（含重启中断的待恢复任务）。
 func (a *App) projectHasRunningBatch(projectID uint) bool {
 	var n int64
 	a.DB.Model(&model.Task{}).
-		Where("project_id = ? AND status IN ("+batchRunningStates+")", projectID).Count(&n)
+		Where("project_id = ? AND status IN ?", projectID, pendingTaskStates).Count(&n)
 	return n > 0
 }
 

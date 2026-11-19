@@ -111,43 +111,62 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 	}()
 
 	// 1. 准备目录
-	req.Hooks.step(StepPrepare)
+	req.beginStep(StepPrepare)
 	req.Hooks.stage("prepare", 10)
-	if out, err := remote.run(ctx, "mkdir -p "+shellQuote(target)); err != nil {
-		return fmt.Errorf("创建目录失败: %v %s", err, out)
-	}
-	req.Hooks.logf("目标目录就绪：" + target)
-	if err := pause(ctx, d.StepDelay); err != nil {
-		return err
-	}
-
-	// 空间阈值：目标目录已占用超过策略上限时，拒绝本次部署
-	if req.Directory.MaxSizeMB > 0 {
-		out, err := remote.run(ctx, "du -sm "+shellQuote(target)+" 2>/dev/null | cut -f1")
-		if err != nil {
-			return fmt.Errorf("统计目录占用失败: %v %s", err, out)
+	if req.skip(StepPrepare) {
+		// 续跑：目录上次已就绪；占用阈值也已在首次执行时校验
+	} else {
+		if out, err := remote.run(ctx, "mkdir -p "+shellQuote(target)); err != nil {
+			return fmt.Errorf("创建目录失败: %v %s", err, out)
 		}
-		if mb, convErr := strconv.Atoi(strings.TrimSpace(out)); convErr == nil {
-			if mb > req.Directory.MaxSizeMB {
-				return fmt.Errorf("目标目录已占用 %d MB，超过阈值 %d MB", mb, req.Directory.MaxSizeMB)
+		req.Hooks.logf("目标目录就绪：" + target)
+		if err := pause(ctx, d.StepDelay); err != nil {
+			return err
+		}
+
+		// 空间阈值：目标目录已占用超过策略上限时，拒绝本次部署
+		if req.Directory.MaxSizeMB > 0 {
+			out, err := remote.run(ctx, "du -sm "+shellQuote(target)+" 2>/dev/null | cut -f1")
+			if err != nil {
+				return fmt.Errorf("统计目录占用失败: %v %s", err, out)
 			}
-			req.Hooks.logf(fmt.Sprintf("目录占用 %d MB / 阈值 %d MB", mb, req.Directory.MaxSizeMB))
+			if mb, convErr := strconv.Atoi(strings.TrimSpace(out)); convErr == nil {
+				if mb > req.Directory.MaxSizeMB {
+					return fmt.Errorf("目标目录已占用 %d MB，超过阈值 %d MB", mb, req.Directory.MaxSizeMB)
+				}
+				req.Hooks.logf(fmt.Sprintf("目录占用 %d MB / 阈值 %d MB", mb, req.Directory.MaxSizeMB))
+			}
 		}
 	}
 
 	// 2. 前置校验
 	if req.PreScript != nil {
-		req.Hooks.step(StepPreCheck)
+		req.beginStep(StepPreCheck)
 		req.Hooks.stage("precheck", 15)
-		if err := runRemoteScript(ctx, remote, req.Server, target, req.Hooks, req.PreScript); err != nil {
-			return err
+		if !req.skip(StepPreCheck) {
+			if err := runRemoteScript(ctx, remote, req.Server, target, req.Hooks, req.PreScript); err != nil {
+				return err
+			}
 		}
 	}
 
 	// 3. 备份
-	req.Hooks.step(StepBackup)
 	req.Hooks.stage("backup", 25)
-	if req.Directory.BackupBeforeDeploy {
+	switch {
+	case req.skip(StepBackup):
+		// 续跑：沿用上次执行创建的最近备份，失败自动恢复仍可用
+		if out, err := remote.run(ctx, "ls -1dt "+shellQuote(target)+".bak-* 2>/dev/null | head -n1"); err == nil {
+			if p := strings.TrimSpace(out); p != "" {
+				backupPath = p
+				req.Hooks.logf("续跑：沿用最近一次备份 " + filepath.Base(p))
+			} else {
+				req.Hooks.logf("续跑：无既有备份可沿用（上次执行时目录为空或策略未开启备份）")
+			}
+		} else {
+			req.Hooks.logf("续跑：查询既有备份失败，本次失败时将无法自动恢复")
+		}
+	case req.Directory.BackupBeforeDeploy:
+		req.Hooks.step(StepBackup)
 		stamp := time.Now().Format("20060102150405")
 		backup := target + ".bak-" + stamp
 		cmd := fmt.Sprintf("if [ -n \"$(ls -A %s 2>/dev/null)\" ]; then cp -a %s %s && echo BACKED_UP; else echo EMPTY; fi",
@@ -160,27 +179,39 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 			backupPath = backup
 		}
 		req.Hooks.logf(strings.TrimSpace(out))
-	} else {
+	default:
+		req.Hooks.step(StepBackup)
 		req.Hooks.logf("目录策略未开启备份，跳过")
 	}
 	if err := pause(ctx, d.StepDelay); err != nil {
 		return err
 	}
 
-	// 3. 上传
-	req.Hooks.step(StepUpload)
+	// 3. 上传（临时文件按任务号命名，续跑时可复用上次已传完的包）
 	req.Hooks.stage("upload", 45)
 	safeName := sanitizeName(req.Package.Name)
 	if strings.TrimSpace(safeName) == "" || safeName == "." || safeName == ".." {
 		return fmt.Errorf("安装包文件名不合法")
 	}
-	tmp := fmt.Sprintf("/tmp/packrun-%d-%s", time.Now().UnixNano(), safeName)
-	if err := remote.upload(ctx, req.SourcePath, tmp); err != nil {
-		return fmt.Errorf("上传失败: %w", err)
+	tmp := fmt.Sprintf("/tmp/packrun-%s-%s", sanitizeRef(req.TaskRef, time.Now().Format("20060102150405")), safeName)
+	reuseUpload := false
+	if req.skip(StepUpload) {
+		if out, err := remote.run(ctx, "test -f "+shellQuote(tmp)+" && echo OK || echo MISSING"); err == nil && strings.Contains(out, "OK") {
+			reuseUpload = true
+			req.Hooks.logf("续跑：安装包在上次尝试中已上传，复用 " + tmp)
+		} else {
+			req.Hooks.logf("续跑：上次上传的临时包已不存在，重新上传")
+		}
 	}
-	req.Hooks.logf(fmt.Sprintf("已上传至 %s（%d 字节）", tmp, req.Package.Size))
+	if !reuseUpload {
+		req.Hooks.step(StepUpload)
+		if err := remote.upload(ctx, req.SourcePath, tmp); err != nil {
+			return fmt.Errorf("上传失败: %w", err)
+		}
+		req.Hooks.logf(fmt.Sprintf("已上传至 %s（%d 字节）", tmp, req.Package.Size))
+	}
 
-	// 4. 校验
+	// 4. 校验（续跑时也重新执行：确认复用的包文件仍然完整）
 	req.Hooks.step(StepVerify)
 	req.Hooks.stage("verify", 60)
 	out, err := remote.run(ctx, "sha256sum "+shellQuote(tmp))
@@ -200,31 +231,26 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 	}
 
 	// 5. 解包/替换
-	req.Hooks.step(StepUnpack)
+	req.beginStep(StepUnpack)
 	req.Hooks.stage("unpack", 75)
-	if req.Package.Kind == "zip" && req.Directory.PackageMode != model.PackageModeUpload {
+	if req.skip(StepUnpack) {
+		// 续跑：上次解包已完整完成
+	} else if req.Package.Kind == "zip" && req.Directory.PackageMode != model.PackageModeUpload {
 		maxBytes, maxEntries := unpackBudget(req)
-		// 解压前先统计条目数，避免海量小文件拖垮目标机。
-		countCmd := fmt.Sprintf("unzip -Z1 %s | wc -l", shellQuote(tmp))
-		countOut, err := remote.run(ctx, countCmd)
+		// 一次取回完整条目清单：条目数上限、越界路径审查与文件级差异都基于它
+		listOut, err := remote.run(ctx, "unzip -Z1 "+shellQuote(tmp))
 		if err != nil {
-			return fmt.Errorf("统计压缩包条目数失败: %v %s", err, countOut)
+			return fmt.Errorf("读取压缩包条目失败: %v %s", err, listOut)
 		}
-		entryCount, convErr := strconv.Atoi(strings.TrimSpace(countOut))
-		if convErr != nil {
-			return fmt.Errorf("统计压缩包条目数失败: %s", strings.TrimSpace(countOut))
+		entries := splitRemoteEntries(listOut)
+		if len(entries) > maxEntries {
+			return fmt.Errorf("压缩包条目数 %d 超过上限 %d", len(entries), maxEntries)
 		}
-		if entryCount > maxEntries {
-			return fmt.Errorf("压缩包条目数 %d 超过上限 %d", entryCount, maxEntries)
-		}
-		// 解压前先审查条目：拒绝绝对路径、.. 穿越、符号链接
-		checkCmd := fmt.Sprintf("unzip -Z1 %s | grep -Eq '(^/|\\.\\.)' && echo UNSAFE || echo SAFE", shellQuote(tmp))
-		checkOut, err := remote.run(ctx, checkCmd)
-		if err != nil {
-			return fmt.Errorf("压缩包条目审查失败: %v %s", err, checkOut)
-		}
-		if strings.Contains(checkOut, "UNSAFE") {
-			return fmt.Errorf("压缩包内存在越界路径，已拒绝解压")
+		// 拒绝绝对路径与 .. 穿越
+		for _, e := range entries {
+			if strings.HasPrefix(e, "/") || containsPathTraversal(e) {
+				return fmt.Errorf("压缩包内存在越界路径 %s，已拒绝解压", e)
+			}
 		}
 		symlinkCmd := fmt.Sprintf(
 			"command -v zipinfo >/dev/null 2>&1 || echo NOZIPINFO; zipinfo -l %s | grep -Eq '^l' && echo SYMLINK || echo SAFE",
@@ -238,6 +264,36 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 		}
 		if strings.Contains(symlinkOut, "SYMLINK") {
 			return fmt.Errorf("压缩包内不允许符号链接，已拒绝解压")
+		}
+		// 文件级差异与目录策略约束（收口手册 §21.1）：
+		// 「仅新增」对 zip 同样生效；开启「干净替换」时按差异清理包内不存在的旧文件。
+		needExisting := req.Manifest != nil || req.Directory.CleanReplace || !req.Directory.AllowOverwrite
+		if needExisting {
+			existing, ok := listRemoteExistingFiles(ctx, remote, target, req.Hooks)
+			switch {
+			case !ok && (req.Directory.CleanReplace || !req.Directory.AllowOverwrite):
+				return fmt.Errorf("无法列出目标目录现有文件，为避免误删或误判冲突，已拒绝本次发布")
+			case ok:
+				added, overwritten, stale := diffManifest(existing, entries)
+				if !req.Directory.AllowOverwrite && overwritten > 0 {
+					return fmt.Errorf("目录策略为「仅新增」，包内 %d 个文件已存在（如 %s），已拒绝解压",
+						overwritten, intersectEntries(existing, entries)[0])
+				}
+				if req.Directory.CleanReplace && len(stale) > 0 {
+					if n := removeRemoteFiles(ctx, remote, target, stale, req.Hooks); n > 0 {
+						req.Hooks.logf(fmt.Sprintf("干净替换：已清理 %d 个包内不存在的旧文件", n))
+					}
+				}
+				if req.Manifest != nil {
+					*req.Manifest = Manifest{
+						TotalEntries: len(entries), Added: added, Overwritten: overwritten,
+						CleanReplace: req.Directory.CleanReplace,
+					}
+					req.Manifest.applyManifestLimits(stale)
+				}
+			default:
+				req.Hooks.logf("列出目标目录现有文件失败，本次发布不生成文件差异清单")
+			}
 		}
 		blocks := maxBytes / 1024
 		if blocks < 1 {
@@ -280,12 +336,17 @@ func (d *SSHDeployer) Deploy(ctx context.Context, req Request) (retErr error) {
 	remote.run(ctx, "rm -f "+shellQuote(tmp))
 
 	// 7. 后置脚本
-	req.Hooks.step(StepScript)
+	req.beginStep(StepScript)
 	req.Hooks.stage("script", 90)
-	if req.Script == nil {
+	switch {
+	case req.skip(StepScript):
+		// 续跑：上次已执行成功
+	case req.Script == nil:
 		req.Hooks.logf("未绑定部署后脚本，跳过")
-	} else if err := runRemoteScript(ctx, remote, req.Server, target, req.Hooks, req.Script); err != nil {
-		return err
+	default:
+		if err := runRemoteScript(ctx, remote, req.Server, target, req.Hooks, req.Script); err != nil {
+			return err
+		}
 	}
 
 	// 8. 清理超出保留版本的备份

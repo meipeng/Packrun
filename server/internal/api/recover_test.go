@@ -28,12 +28,13 @@ func newRecoverTestDB(t *testing.T) *gorm.DB {
 		t.Fatalf("获取底层连接失败: %v", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.AutoMigrate(&model.Task{}, &model.TaskStep{}, &model.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&model.Task{}, &model.TaskStep{}, &model.AuditLog{}, &model.TaskScript{}); err != nil {
 		t.Fatalf("迁移表结构失败: %v", err)
 	}
 	return db
 }
 
+// 重启收口：已开始执行的任务进入「待恢复」，排队任务保持排队并返回待入队 ID。
 func TestRecoverInterruptedTasks(t *testing.T) {
 	db := newRecoverTestDB(t)
 
@@ -51,16 +52,20 @@ func TestRecoverInterruptedTasks(t *testing.T) {
 		t.Fatalf("写入步骤失败: %v", err)
 	}
 
-	if n := RecoverInterruptedTasks(db); n != 2 {
-		t.Fatalf("应恢复 2 个任务，实际 %d", n)
+	pendingIDs, interrupted := RecoverInterruptedTasks(db)
+	if interrupted != 1 {
+		t.Fatalf("应中断收口 1 个任务，实际 %d", interrupted)
+	}
+	if len(pendingIDs) != 1 || pendingIDs[0] != tasks[1].ID {
+		t.Fatalf("排队任务应返回待入队 ID，实际 %v", pendingIDs)
 	}
 
 	for _, want := range []struct {
 		taskNo string
 		status string
 	}{
-		{"R-EXEC", model.TaskFailed},
-		{"R-PENDING", model.TaskFailed},
+		{"R-EXEC", model.TaskInterrupted},
+		{"R-PENDING", model.TaskPending},
 		{"R-OK", model.TaskSuccess},
 	} {
 		var task model.Task
@@ -70,9 +75,11 @@ func TestRecoverInterruptedTasks(t *testing.T) {
 		if task.Status != want.status {
 			t.Fatalf("任务 %s 状态 = %s，期望 %s", want.taskNo, task.Status, want.status)
 		}
-		if want.status == model.TaskFailed && task.Message != "服务重启，任务执行中断" {
-			t.Fatalf("任务 %s 消息 = %q", want.taskNo, task.Message)
-		}
+	}
+	var interruptedTask model.Task
+	db.Where("task_no = ?", "R-EXEC").First(&interruptedTask)
+	if interruptedTask.FinishedAt != nil {
+		t.Fatal("待恢复任务不应写 finished_at（尚未结束）")
 	}
 
 	var step model.TaskStep
@@ -85,15 +92,16 @@ func TestRecoverInterruptedTasks(t *testing.T) {
 
 	var auditCount int64
 	db.Model(&model.AuditLog{}).Where("action = ?", "task.recover").Count(&auditCount)
-	if auditCount != 2 {
-		t.Fatalf("应写入 2 条 task.recover 审计，实际 %d", auditCount)
+	if auditCount != 1 {
+		t.Fatalf("应写入 1 条 task.recover 审计（仅中断任务），实际 %d", auditCount)
 	}
 }
 
 func TestRecoverInterruptedTasksNoop(t *testing.T) {
 	db := newRecoverTestDB(t)
-	if n := RecoverInterruptedTasks(db); n != 0 {
-		t.Fatalf("无未完成任务时应返回 0，实际 %d", n)
+	pendingIDs, interrupted := RecoverInterruptedTasks(db)
+	if interrupted != 0 || len(pendingIDs) != 0 {
+		t.Fatalf("无未完成任务时应返回空，实际 pendingIDs=%v interrupted=%d", pendingIDs, interrupted)
 	}
 }
 
