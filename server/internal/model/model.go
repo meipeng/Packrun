@@ -22,13 +22,20 @@ const (
 
 // 任务状态机
 const (
-	TaskPending   = "pending"
-	TaskUploading = "uploading"
-	TaskVerifying = "verifying"
-	TaskExecuting = "executing"
-	TaskSuccess   = "success"
-	TaskFailed    = "failed"
-	TaskCanceled  = "canceled"
+	TaskPending      = "pending"
+	TaskUploading    = "uploading"
+	TaskVerifying    = "verifying"
+	TaskExecuting    = "executing"
+	TaskInterrupted  = "interrupted" // 服务重启中断，待人工恢复或标记失败
+	TaskSuccess      = "success"
+	TaskFailed       = "failed"
+	TaskCanceled     = "canceled"
+)
+
+// 任务执行计划快照的归属阶段。
+const (
+	ScriptPhasePre  = "precheck"
+	ScriptPhasePost = "postdeploy"
 )
 
 // 任务类型：常规发布 / 历史回滚
@@ -231,9 +238,31 @@ type Task struct {
 	Progress         int        `json:"progress"`
 	Message          string     `gorm:"size:512" json:"message"`
 	OTPVerified      bool       `json:"otpVerified"`
-	StartedAt        *time.Time `json:"startedAt"`
-	FinishedAt       *time.Time `json:"finishedAt"`
-	CreatedAt        time.Time  `json:"createdAt"`
+	// Manifest zip 发布的文件级差异清单 JSON（结构见 deploy.Manifest），非 zip 发布为空。
+	Manifest    string     `gorm:"type:text" json:"manifest"`
+	StartedAt   *time.Time `json:"startedAt"`
+	FinishedAt  *time.Time `json:"finishedAt"`
+	CreatedAt   time.Time  `json:"createdAt"`
+}
+
+// TaskScript 任务受理时的脚本快照：执行与展示均以快照为准，
+// 脚本后续编辑、删除都不影响已受理任务（收口手册 §21.7）。
+type TaskScript struct {
+	ID         uint   `gorm:"primarykey" json:"id"`
+	TaskID     uint   `gorm:"index;not null" json:"taskId"`
+	Phase      string `gorm:"size:24;not null" json:"phase"` // precheck | postdeploy
+	ScriptID   uint   `json:"scriptId"`
+	Name       string `gorm:"size:64" json:"name"`
+	Version    int    `json:"version"`
+	Content    string `gorm:"type:text" json:"content"`
+	TimeoutSec int    `json:"timeoutSec"`
+	RunAs      string `gorm:"size:64" json:"runAs"`
+}
+
+// AlertDedup 告警去重状态：跨重启保证同一事件在窗口内只推送一次（收口手册 §21.13）。
+type AlertDedup struct {
+	Key    string    `gorm:"primarykey;size:128" json:"key"`
+	LastAt time.Time `json:"lastAt"`
 }
 
 type TaskStep struct {

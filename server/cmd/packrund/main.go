@@ -104,11 +104,12 @@ func main() {
 	// 任务步骤正文按保留天数清理，避免数据库随时间无限增长。
 	api.StartTaskLogRetentionWorker(app, cfg.Storage.TaskLogRetentionDays)
 	// 后台巡检：磁盘余量、包仓库配额、失败任务、证书到期，按需推送告警。
+	// 去重状态落库：重启后同一事件在窗口内不会重复推送。
 	var notifier notify.Notifier = notify.Nop{}
 	if url := strings.TrimSpace(cfg.Alert.WebhookURL); url != "" {
 		notifier = notify.NewWebhook(url, cfg.Alert.Format, time.Duration(cfg.Alert.MinIntervalSec)*time.Second)
 	}
-	api.StartWatchdog(app, notifier, time.Duration(cfg.Alert.CheckIntervalSec)*time.Second)
+	api.StartWatchdog(app, notifier, &api.GormDedupStore{DB: db}, time.Duration(cfg.Alert.CheckIntervalSec)*time.Second)
 
 	handler := http.Handler(api.NewRouter(app))
 	if cfg.Server.BasePath != "/" {

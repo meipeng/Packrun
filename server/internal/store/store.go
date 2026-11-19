@@ -42,9 +42,9 @@ func Open(cfg *config.Config) (*gorm.DB, error) {
 
 	if err := db.AutoMigrate(
 		&model.User{}, &model.RecoveryCode{}, &model.Server{}, &model.Directory{}, &model.Script{},
-		&model.Package{}, &model.Task{}, &model.TaskStep{}, &model.AuditLog{},
+		&model.Package{}, &model.Task{}, &model.TaskStep{}, &model.TaskScript{}, &model.AuditLog{},
 		&model.Project{}, &model.ProjectDirectory{}, &model.ProjectMember{},
-		&model.ServerMetric{},
+		&model.ServerMetric{}, &model.AlertDedup{},
 	); err != nil {
 		return nil, err
 	}

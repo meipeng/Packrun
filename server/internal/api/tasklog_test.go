@@ -112,11 +112,10 @@ func (f *fakeNotifier) Send(_ context.Context, m notify.Message) error {
 
 func newTestWatchdog(app *App, notifier notify.Notifier) *watchdog {
 	return &watchdog{
-		app:          app,
-		notifier:     notifier,
-		interval:     time.Minute,
-		alertedTasks: map[uint]bool{},
-		alertedCert:  map[string]bool{},
+		app:      app,
+		notifier: notifier,
+		dedup:    notify.NewMemoryDedup(),
+		interval: time.Minute,
 	}
 }
 

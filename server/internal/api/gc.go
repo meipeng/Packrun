@@ -245,6 +245,9 @@ func maintenanceOnce(app *App, withGC bool) {
 	if n := purgeExpiredAuditLogs(app, app.Cfg.Storage.AuditRetentionDays); n > 0 {
 		log.Printf("[audit] 已删除 %d 条超过 %d 天的审计日志", n, app.Cfg.Storage.AuditRetentionDays)
 	}
+	if n := purgeAlertDedup(app, 7 * 24 * time.Hour); n > 0 {
+		log.Printf("[alert] 已清理 %d 条过期的告警去重记录", n)
+	}
 }
 
 // StartMaintenanceWorker 启动后立即维护一次，之后每小时一次；包仓库回收每天一次。

@@ -33,10 +33,38 @@ type Notifier interface {
 	Send(ctx context.Context, m Message) error
 }
 
+// DedupStore 抽象「同一 Key 在窗口内只发送一次」的去重状态。
+// 默认实现保存在进程内存，重启即失效；装配层可注入落库实现实现跨重启去重。
+// window<=0 表示「记录存在即拒绝」的一次性去重（如失败任务告警）。
+type DedupStore interface {
+	Allow(key string, now time.Time, window time.Duration) bool
+}
+
 // Nop 在未配置外部渠道时使用：调用方仍会写服务日志。
 type Nop struct{}
 
 func (Nop) Send(context.Context, Message) error { return nil }
+
+// memoryDedup DedupStore 的进程内实现：重启即失效，作为未落库时的兜底。
+type memoryDedup struct {
+	mu     sync.Mutex
+	lastAt map[string]time.Time
+}
+
+// NewMemoryDedup 返回进程内去重存储。
+func NewMemoryDedup() DedupStore {
+	return &memoryDedup{lastAt: map[string]time.Time{}}
+}
+
+func (m *memoryDedup) Allow(key string, now time.Time, window time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at, ok := m.lastAt[key]; ok && (window <= 0 || now.Sub(at) < window) {
+		return false
+	}
+	m.lastAt[key] = now
+	return true
+}
 
 // Webhook 通用 webhook 推送，支持企业微信群机器人（wecom）与通用 JSON（generic）两种格式。
 type Webhook struct {
@@ -44,6 +72,9 @@ type Webhook struct {
 	Format      string // wecom | generic
 	Client      *http.Client
 	MinInterval time.Duration // 同一 Key 的去重窗口
+	// Dedup 可选的外部去重存储（落库）；为 nil 时退回进程内 map。
+	// 注意：即使配置了 Dedup，也只在 Webhook 被直接调用时生效；watchdog 在 send 前统一去重。
+	Dedup DedupStore
 
 	mu     sync.Mutex
 	lastAt map[string]time.Time
@@ -67,6 +98,9 @@ func NewWebhook(url, format string, minInterval time.Duration) *Webhook {
 
 // allow 判断该 Key 是否已过去重窗口；窗口内重复消息直接丢弃。
 func (w *Webhook) allow(key string, now time.Time) bool {
+	if w.Dedup != nil {
+		return w.Dedup.Allow(key, now, w.MinInterval)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.lastAt == nil {
