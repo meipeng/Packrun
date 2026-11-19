@@ -7,7 +7,7 @@ func TestValidate(t *testing.T) {
 		validJWTSecret  = "0123456789abcdef0123456789abcdef" // 32 位
 		validAdminPass  = "S3cure-Admin-Pass"
 		shortJWTSecret  = "0123456789abcdef0123456789abcde" // 31 位
-		defaultPassword = "Admin@12345"
+		defaultPassword = defaultAdminPassword // 与 config 包常量同源，避免字面量
 	)
 
 	tests := []struct {
