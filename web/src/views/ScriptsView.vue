@@ -46,11 +46,17 @@ async function save() {
   dialog.saving = true
   try {
     if (dialog.form.id) {
-      await scriptApi.update(dialog.form.id, dialog.form)
+      // 已受理任务按受理时快照执行：后端在脚本仍被未完成任务引用时返回提示
+      const saved: any = await scriptApi.update(dialog.form.id, dialog.form)
+      if (saved?.warning) {
+        ElMessage.warning(saved.warning)
+      } else {
+        ElMessage.success('已保存')
+      }
     } else {
       await scriptApi.create(dialog.form)
+      ElMessage.success('已保存')
     }
-    ElMessage.success('已保存')
     dialog.visible = false
     load()
   } catch (e: any) {

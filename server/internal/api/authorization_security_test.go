@@ -26,9 +26,9 @@ func newSecurityTestEnv(t *testing.T) (*App, *gin.Engine, *gorm.DB) {
 	t.Helper()
 	app, router, db := newAuthTestEnv(t)
 	if err := db.AutoMigrate(
-		&model.Server{}, &model.Directory{}, &model.Package{},
+		&model.Server{}, &model.Directory{}, &model.Script{}, &model.Package{},
 		&model.Project{}, &model.ProjectDirectory{}, &model.ProjectMember{},
-		&model.Task{}, &model.TaskStep{},
+		&model.Task{}, &model.TaskStep{}, &model.TaskScript{},
 	); err != nil {
 		t.Fatalf("迁移业务表失败: %v", err)
 	}

@@ -178,6 +178,10 @@ func purgeExpiredTasks(app *App, days int) int {
 			log.Printf("[tasks] 删除过期任务步骤失败: %v", err)
 			return total
 		}
+		if err := app.DB.Where("task_id IN ?", ids).Delete(&model.TaskScript{}).Error; err != nil {
+			log.Printf("[tasks] 删除过期任务脚本快照失败: %v", err)
+			return total
+		}
 		res := app.DB.Delete(&model.Task{}, ids)
 		if res.Error != nil {
 			log.Printf("[tasks] 删除过期任务失败: %v", res.Error)

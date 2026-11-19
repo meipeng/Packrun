@@ -14,6 +14,9 @@ var pendingTaskStates = []string{
 	model.TaskPending, model.TaskUploading, model.TaskVerifying, model.TaskExecuting,
 }
 
+// unfinishedTaskStates 所有未终态状态：配额、项目批次运行中判断与脚本引用提示共用。
+var unfinishedTaskStates = append(pendingTaskStates, model.TaskInterrupted)
+
 func (a *App) pendingTaskLimit() int {
 	if a.Cfg == nil || a.Cfg.Deploy.MaxPendingPerUser <= 0 {
 		return pendingTaskFallbackLimit

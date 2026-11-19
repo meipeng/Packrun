@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -87,6 +88,12 @@ func (a *App) updateScript(c *gin.Context) {
 		"version": s.Version + 1,
 	})
 	a.audit(c, "script.update", s.Name, "ok", "", "修改部署脚本（版本递增）", false)
+	// 已受理任务按受理时的脚本快照执行，本次修改只影响之后的新任务；引用提示让影响面可见。
+	if n := a.countUnfinishedScriptRefs(s.ID); n > 0 {
+		ok(c, gin.H{"script": s, "warning": fmt.Sprintf(
+			"该脚本被 %d 个未完成任务引用：已受理任务按受理时快照执行，不受本次修改影响", n)})
+		return
+	}
 	ok(c, s)
 }
 

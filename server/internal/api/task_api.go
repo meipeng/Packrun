@@ -184,6 +184,8 @@ func (a *App) createTask(c *gin.Context) {
 		internal(c, "创建任务失败")
 		return
 	}
+	// 脚本内容随任务固化：执行与展示均以快照为准，脚本后续编辑/删除不影响已受理任务。
+	a.snapshotTaskScripts(&task, preScript, script)
 
 	a.audit(c, "task.create", srv.Name+":"+dir.Path, "ok", task.TaskNo,
 		fmt.Sprintf("包=%s 前置脚本=%s(v%d) 后置脚本=%s(v%d) 环境=%s",
@@ -196,6 +198,75 @@ func (a *App) createTask(c *gin.Context) {
 
 func newTaskNo() string {
 	return "D" + time.Now().Format("20060102150405") + strings.ToUpper(randomHex(3))
+}
+
+// ---------- 脚本快照 ----------
+
+// snapshotTaskScripts 把任务引用的脚本内容固化为快照（收口手册 §21.7）：
+// 排队/执行期间脚本被编辑或删除，都不影响已受理任务。
+func (a *App) snapshotTaskScripts(task *model.Task, preScript, script *model.Script) {
+	for phase, s := range map[string]*model.Script{
+		model.ScriptPhasePre:  preScript,
+		model.ScriptPhasePost: script,
+	} {
+		if s == nil {
+			continue
+		}
+		if err := a.DB.Create(&model.TaskScript{
+			TaskID: task.ID, Phase: phase, ScriptID: s.ID, Name: s.Name,
+			Version: s.Version, Content: s.Content, TimeoutSec: s.TimeoutSec, RunAs: s.RunAs,
+		}).Error; err != nil {
+			log.Printf("[task] %s 脚本快照写入失败 phase=%s: %v", task.TaskNo, phase, err)
+		}
+	}
+}
+
+// loadTaskScripts 读取任务的脚本：优先用受理时固化的快照；
+// 无快照的存量任务（功能上线前受理）回退按 ID 现读。
+// reason 非空表示引用的脚本已不可用，任务应失败收口。
+func (a *App) loadTaskScripts(task *model.Task) (preScript, script *model.Script, reason string) {
+	var snaps []model.TaskScript
+	a.DB.Where("task_id = ?", task.ID).Order("id asc").Find(&snaps)
+	if len(snaps) == 0 {
+		if task.PreScriptID != nil {
+			var s model.Script
+			if err := a.DB.First(&s, *task.PreScriptID).Error; err != nil {
+				return nil, nil, "前置校验脚本已被删除"
+			}
+			preScript = &s
+		}
+		if task.ScriptID != nil {
+			var s model.Script
+			if err := a.DB.First(&s, *task.ScriptID).Error; err != nil {
+				return nil, nil, "部署后脚本已被删除"
+			}
+			script = &s
+		}
+		return preScript, script, ""
+	}
+	for i := range snaps {
+		s := &model.Script{
+			ID: snaps[i].ScriptID, Name: snaps[i].Name, Phase: snaps[i].Phase,
+			Content: snaps[i].Content, TimeoutSec: snaps[i].TimeoutSec,
+			RunAs: snaps[i].RunAs, Version: snaps[i].Version,
+		}
+		if snaps[i].Phase == model.ScriptPhasePre {
+			preScript = s
+		} else {
+			script = s
+		}
+	}
+	return preScript, script, ""
+}
+
+// countUnfinishedScriptRefs 统计未完成任务对该脚本的引用数，用于编辑提示。
+func (a *App) countUnfinishedScriptRefs(scriptID uint) int64 {
+	var n int64
+	a.DB.Model(&model.Task{}).
+		Where("(pre_script_id = ? OR script_id = ?) AND status IN ?",
+			scriptID, scriptID, unfinishedTaskStates).
+		Count(&n)
+	return n
 }
 
 // ---------- 执行 ----------
@@ -249,23 +320,11 @@ func (a *App) runTask(id uint) {
 		return
 	}
 
-	var preScript *model.Script
-	if task.PreScriptID != nil {
-		var s model.Script
-		if err := a.DB.First(&s, *task.PreScriptID).Error; err != nil {
-			a.finishTask(id, model.TaskFailed, "前置校验脚本已被删除", nil)
-			return
-		}
-		preScript = &s
-	}
-	var script *model.Script
-	if task.ScriptID != nil {
-		var s model.Script
-		if err := a.DB.First(&s, *task.ScriptID).Error; err != nil {
-			a.finishTask(id, model.TaskFailed, "部署后脚本已被删除", nil)
-			return
-		}
-		script = &s
+	// 脚本以受理时快照为准；无快照的存量任务回退按 ID 现读。
+	preScript, script, snapReason := a.loadTaskScripts(&task)
+	if snapReason != "" {
+		a.finishTask(id, model.TaskFailed, snapReason, nil)
+		return
 	}
 
 	now := time.Now()
@@ -434,7 +493,9 @@ func (a *App) getTask(c *gin.Context) {
 	}
 	var steps []model.TaskStep
 	a.DB.Where("task_id = ?", id).Order("seq asc").Find(&steps)
-	ok(c, gin.H{"task": task, "steps": steps})
+	var scripts []model.TaskScript
+	a.DB.Where("task_id = ?", id).Order("id asc").Find(&scripts)
+	ok(c, gin.H{"task": task, "steps": steps, "scripts": scripts})
 }
 
 func (a *App) cancelTask(c *gin.Context) {
@@ -501,6 +562,10 @@ func (a *App) deleteTask(c *gin.Context) {
 	}
 	if err := a.DB.Where("task_id = ?", task.ID).Delete(&model.TaskStep{}).Error; err != nil {
 		internal(c, "删除任务步骤失败")
+		return
+	}
+	if err := a.DB.Where("task_id = ?", task.ID).Delete(&model.TaskScript{}).Error; err != nil {
+		internal(c, "删除任务脚本快照失败")
 		return
 	}
 	if err := a.DB.Delete(&model.Task{}, task.ID).Error; err != nil {

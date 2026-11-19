@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Refresh } from '@element-plus/icons-vue'
-import { taskApi, type Task, type TaskStep } from '@/api'
+import { taskApi, type Task, type TaskScriptSnapshot, type TaskStep } from '@/api'
 import { useAuthStore } from '@/stores/auth'
 import { isRunning, statusMeta } from '@/utils/status'
 
@@ -14,6 +14,7 @@ const id = Number(route.params.id)
 
 const task = ref<Task | null>(null)
 const steps = ref<TaskStep[]>([])
+const scripts = ref<TaskScriptSnapshot[]>([])
 const loading = ref(true)
 let timer: number | undefined
 
@@ -31,6 +32,7 @@ async function load() {
     const data = await taskApi.get(id)
     task.value = data.task
     steps.value = data.steps || []
+    scripts.value = data.scripts || []
     if (!isRunning(data.task.status)) {
       stopPolling()
     }
@@ -167,6 +169,18 @@ onBeforeUnmount(stopPolling)
         <el-empty v-else description="等待执行" :image-size="80" />
       </div>
     </div>
+
+    <div class="pr-card snapshot-card" v-if="scripts.length">
+      <div class="card-title">执行脚本快照<span class="card-sub">受理时固化，脚本后续编辑不影响本任务</span></div>
+      <el-collapse>
+        <el-collapse-item v-for="s in scripts" :key="s.id" :name="String(s.id)">
+          <template #title>
+            {{ s.phase === 'precheck' ? '前置校验' : '部署后执行' }}：{{ s.name }}（v{{ s.version }}，超时 {{ s.timeoutSec }}s{{ s.runAs ? `，身份 ${s.runAs}` : '' }}）
+          </template>
+          <pre class="pr-log">{{ s.content }}</pre>
+        </el-collapse-item>
+      </el-collapse>
+    </div>
   </div>
 </template>
 
@@ -198,6 +212,17 @@ onBeforeUnmount(stopPolling)
   font-size: 14px;
   font-weight: 600;
   margin-bottom: 14px;
+}
+
+.snapshot-card {
+  margin-top: 16px;
+}
+
+.card-sub {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--pr-sub);
+  margin-left: 8px;
 }
 
 .progress-box {

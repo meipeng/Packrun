@@ -151,6 +151,19 @@ export interface TaskStep {
   finishedAt?: string
 }
 
+/** 任务受理时固化的脚本快照：执行与展示均以快照为准 */
+export interface TaskScriptSnapshot {
+  id: number
+  taskId: number
+  phase: 'precheck' | 'postdeploy' | string
+  scriptId: number
+  name: string
+  version: number
+  content: string
+  timeoutSec: number
+  runAs: string
+}
+
 export interface AuditLog {
   id: number
   actor: string
@@ -384,7 +397,7 @@ export const packageApi = {
 
 export const taskApi = {
   list: (params: Record<string, unknown>) => get<Page<Task>>('/tasks', params),
-  get: (id: number) => get<{ task: Task; steps: TaskStep[] }>(`/tasks/${id}`),
+  get: (id: number) => get<{ task: Task; steps: TaskStep[]; scripts: TaskScriptSnapshot[] }>(`/tasks/${id}`),
   create: (data: {
     serverId: number
     directoryId: number

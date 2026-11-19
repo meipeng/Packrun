@@ -582,6 +582,8 @@ func (a *App) createBatchTasks(c *gin.Context, u *model.User, p model.Project,
 		if err := a.DB.Create(&task).Error; err != nil {
 			continue
 		}
+		// 与部署向导一致：脚本内容随任务固化，批量受理后编辑脚本不影响本批次。
+		a.snapshotTaskScripts(&task, preScript, script)
 		tasks = append(tasks, task)
 		go a.runTask(task.ID)
 	}
