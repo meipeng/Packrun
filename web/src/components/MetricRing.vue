@@ -14,12 +14,14 @@ const props = withDefaults(
     caption?: string
     size?: number
     stroke?: number
+    /** 覆盖默认水位配色；用于在线率这类「越高越好」的指标 */
+    color?: string
   }>(),
-  { display: '', unit: '%', label: '', caption: '', size: 112, stroke: 10 },
+  { display: '', unit: '%', label: '', caption: '', size: 112, stroke: 10, color: '' },
 )
 
 const pct = computed(() => (props.percentage == null ? 0 : Math.max(0, Math.min(100, Math.round(props.percentage)))))
-const color = computed(() => usageColor(props.percentage))
+const color = computed(() => props.color || usageColor(props.percentage))
 const radius = computed(() => (props.size - props.stroke) / 2)
 const circumference = computed(() => 2 * Math.PI * radius.value)
 const dash = computed(() => (pct.value / 100) * circumference.value)

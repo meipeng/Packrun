@@ -390,7 +390,8 @@ onMounted(() => load())
           <span class="mc-sub">{{ list.length }} 台纳管</span>
         </div>
         <div class="mc-online">
-          <MetricRing :percentage="onlineRate" :size="78" :stroke="8" />
+          <!-- 在线率是「越高越好」的指标，固定绿色，与「在线」圆点同色 -->
+          <MetricRing :percentage="onlineRate" :size="78" :stroke="8" color="#34c759" />
           <div class="mc-legend">
             <div><i class="dot online" />在线 <b>{{ onlineTotal }}</b></div>
             <div><i class="dot offline" />不可达 <b>{{ offlineTotal }}</b></div>

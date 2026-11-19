@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Delete, Folder, Plus, Setting, UploadFilled } from '@element-plus/icons-vue'
+import { CaretBottom, Delete, Folder, Plus, Setting, UploadFilled } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import {
   directoryApi,
@@ -229,6 +229,8 @@ async function loadUsers() {
 }
 
 onMounted(async () => {
+  // 用户列表独立加载：包/服务器/脚本/目录任一失败都不应让成员下拉失去候选
+  void loadUsers()
   await loadProjects(false)
   try {
     const [pk, sv, sc] = await Promise.all([packageApi.list(), serverApi.list(), scriptApi.list()])
@@ -236,9 +238,8 @@ onMounted(async () => {
     servers.value = sv
     scripts.value = sc
     allDirs.value = await directoryApi.list()
-    await loadUsers()
   } catch {
-    /* 非管理员拉取用户列表会 403，忽略 */
+    /* 各列表有独立的失败提示，这里不再级联吞掉其他请求 */
   }
 })
 
@@ -270,11 +271,11 @@ async function saveCreate() {
 }
 
 // ---------- 项目设置 ----------
-function openSettings() {
+async function openSettings() {
   const p = current.value
   if (!p) return
-  // 用户列表为空时补加载一次，避免成员下拉只显示原始 ID。
-  if (isAdmin.value && !users.value.length) void loadUsers()
+  // 用户列表为空时等待补加载，避免成员下拉只剩已授权成员兜底或显示原始 ID。
+  if (isAdmin.value && !users.value.length) await loadUsers()
   dialog.settingsForm = {
     directoryIds: p.dirs.map((d) => d.id),
     memberIds: p.members.map((m) => m.id),
@@ -396,7 +397,9 @@ function dayKey(d: Date) {
   return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
 }
 
-// 最近上传按 yyyyMMdd 分组：当天直接平铺，其余日期带分组标题。
+// 最近上传按 yyyyMMdd 分组：每个日期都是可折叠的分组标题。
+// 默认当天展开、历史日期折叠，避免上传记录多时把部署空间撑得过长。
+const collapsedDays = reactive<Record<string, boolean>>({})
 const recentGroups = computed(() => {
   const groups = new Map<string, Package[]>()
   for (const p of packages.value) {
@@ -414,6 +417,15 @@ const recentGroups = computed(() => {
       .map(([key, items]) => ({ key, isToday: false, items })),
   ].filter((g) => g.items.length > 0)
 })
+
+function dayCollapsed(key: string, isToday: boolean) {
+  // 显式记录折叠状态；未记录时当天默认展开、历史日期默认折叠
+  return collapsedDays[key] ?? !isToday
+}
+
+function toggleDay(key: string, isToday: boolean) {
+  collapsedDays[key] = !dayCollapsed(key, isToday)
+}
 
 const stagedText = computed(() => {
   if (!staged.value) return ''
@@ -651,20 +663,26 @@ const dirLabel = (d: Directory) => {
           <div class="pkg-list" v-if="packages.length">
             <div class="pkg-head">最近上传<span style="font-weight: 400; font-size: 11px; opacity: 0.65">（仅显示本人上传）</span></div>
             <template v-for="g in recentGroups" :key="g.key">
-              <div class="pkg-day" v-if="!g.isToday">{{ g.key }}</div>
-              <div
-                v-for="p in g.items"
-                :key="p.id"
-                class="pkg-item"
-                :class="{ active: staged?.mode === 'pkg' && staged.pkg.id === p.id }"
-                @click="pickRecent(p)"
-              >
-                <el-tag size="small" effect="plain">{{ p.kind.toUpperCase() }}</el-tag>
-                <span class="pkg-name">{{ p.name }}</span>
-                <span class="pkg-time">{{ formatDateTime(p.createdAt) }}</span>
-                <span class="pkg-size">{{ formatSize(p.size) }}</span>
-                <span class="pkg-hash pr-mono">{{ p.sha256.slice(0, 12) }}…</span>
+              <div class="pkg-day pkg-day-head" @click="toggleDay(g.key, g.isToday)">
+                <el-icon class="pkg-caret" :class="{ folded: dayCollapsed(g.key, g.isToday) }"><CaretBottom /></el-icon>
+                <span>{{ g.isToday ? `今天（${g.key}）` : g.key }}</span>
+                <span class="pkg-day-count">{{ g.items.length }} 个</span>
               </div>
+              <template v-if="!dayCollapsed(g.key, g.isToday)">
+                <div
+                  v-for="p in g.items"
+                  :key="p.id"
+                  class="pkg-item"
+                  :class="{ active: staged?.mode === 'pkg' && staged.pkg.id === p.id }"
+                  @click="pickRecent(p)"
+                >
+                  <el-tag size="small" effect="plain">{{ p.kind.toUpperCase() }}</el-tag>
+                  <span class="pkg-name">{{ p.name }}</span>
+                  <span class="pkg-time">{{ formatDateTime(p.createdAt) }}</span>
+                  <span class="pkg-size">{{ formatSize(p.size) }}</span>
+                  <span class="pkg-hash pr-mono">{{ p.sha256.slice(0, 12) }}…</span>
+                </div>
+              </template>
             </template>
           </div>
 
@@ -856,6 +874,7 @@ const dirLabel = (d: Directory) => {
         </el-form-item>
         <el-form-item label="项目成员" v-if="isAdmin">
           <el-select v-model="dialog.settingsForm.memberIds" multiple filterable style="width: 100%" placeholder="授权后成员可见并可操作本项目">
+            <el-option v-if="!memberOptions.length" disabled value="__empty__" label="暂无可授权成员：请先在「用户与权限」创建子账号" />
             <el-option v-for="u in memberOptions" :key="u.id" :label="u.label" :value="u.id" />
           </el-select>
           <div class="form-tip">成员即子用户的可见范围：仅被授权的用户能在工作台看到该项目。</div>
@@ -1146,6 +1165,37 @@ const dirLabel = (d: Directory) => {
   font-weight: 600;
   color: #9aa1ae;
   letter-spacing: 0.4px;
+}
+
+.pkg-day-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 10px 2px 4px;
+  padding: 2px 0;
+  cursor: pointer;
+  user-select: none;
+  letter-spacing: 0.4px;
+}
+
+.pkg-day-head:hover {
+  color: var(--pr-text);
+}
+
+.pkg-caret {
+  font-size: 12px;
+  transition: transform 0.2s ease;
+}
+
+.pkg-caret.folded {
+  transform: rotate(-90deg);
+}
+
+.pkg-day-count {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 .pkg-item {
