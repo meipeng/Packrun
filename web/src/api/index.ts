@@ -331,11 +331,19 @@ export const scriptApi = {
 /** 单包上限，与后端 maxPackageSize、Nginx client_max_body_size 保持一致 */
 export const MAX_PACKAGE_BYTES = 200 * 1024 * 1024
 
-function uploadOnce(file: File, onProgress?: (pct: number) => void) {
+/** 生成本次上传的幂等令牌：同一文件的自动重试携带同一令牌，服务端命中后直接返回原记录 */
+function newUploadToken(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
+}
+
+function uploadOnce(file: File, token: string, onProgress?: (pct: number) => void) {
   const form = new FormData()
   form.append('file', file)
   return post<Package>('/packages', form, {
-    headers: { 'Content-Type': 'multipart/form-data' },
+    headers: { 'Content-Type': 'multipart/form-data', 'X-Upload-Token': token },
     // 全局 60s 超时会在上传大包（上限 200MB）中途中断请求，上传单独放宽到 15 分钟。
     timeout: 15 * 60 * 1000,
     onUploadProgress: (e: ProgressEvent) => {
@@ -351,8 +359,8 @@ export const packageApi = {
   remove: (id: number) => del<{ deleted: boolean }>(`/packages/${id}`),
   /**
    * 上传安装包。网络中断、超时、网关错误自动重试一次（大包走公网/隧道时很常见）。
-   * 服务端采用「临时文件 + fsync + 原子改名」，失败不会留下半截包文件，
-   * 因此重试不会污染包仓库；只有响应丢失的极端情况可能产生一条重复记录。
+   * 服务端采用「临时文件 + fsync + 原子改名」，失败不会留下半截包文件；
+   * 重试携带同一幂等令牌，服务端命中后直接返回已登记的记录，不会产生重复条目。
    */
   upload: async (
     file: File,
@@ -360,9 +368,10 @@ export const packageApi = {
     options?: { retries?: number; onRetry?: (attempt: number) => void },
   ): Promise<Package> => {
     const retries = options?.retries ?? 1
+    const token = newUploadToken()
     for (let attempt = 0; ; attempt++) {
       try {
-        return await uploadOnce(file, onProgress)
+        return await uploadOnce(file, token, onProgress)
       } catch (e: any) {
         if (attempt >= retries || !e?.retryable) throw e
         options?.onRetry?.(attempt + 1)

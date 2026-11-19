@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -28,7 +29,8 @@ const packageRetentionDays = 3
 var zipMagic = []byte{'P', 'K', 0x03, 0x04}
 
 func (a *App) uploadPackage(c *gin.Context) {
-	if currentUser(c).Role == model.RoleAuditor {
+	u := currentUser(c)
+	if u.Role == model.RoleAuditor {
 		forbidden(c, "审计角色不可上传安装包")
 		return
 	}
@@ -71,6 +73,17 @@ func (a *App) uploadPackage(c *gin.Context) {
 		return
 	}
 
+	// 幂等重放检查（收口手册 §21.4）：上次上传已成功、只是响应丢失时，
+	// 客户端携带同一令牌重试，这里直接返回原记录，不再登记重复的包。
+	if e, hit := a.uploadTokens.claim(tokenKey(c.GetHeader("X-Upload-Token")), name, u.ID); hit {
+		var pkg model.Package
+		if err := a.DB.First(&pkg, e.packageID).Error; err == nil {
+			ok(c, pkg)
+			return
+		}
+		// 原包记录已被删除：按全新上传继续处理
+	}
+
 	// 不信任扩展名：先读文件头确认确实是 ZIP/JAR，已读字节稍后接回写入流。
 	header := make([]byte, len(zipMagic))
 	n, err := io.ReadFull(part, header)
@@ -108,7 +121,7 @@ func (a *App) uploadPackage(c *gin.Context) {
 		Size:       written,
 		SHA256:     sum,
 		StorageKey: key,
-		UploaderID: currentUser(c).ID,
+		UploaderID: u.ID,
 	}
 	if err := a.DB.Create(&pkg).Error; err != nil {
 		os.Remove(dst)
@@ -116,8 +129,73 @@ func (a *App) uploadPackage(c *gin.Context) {
 		return
 	}
 
+	// 登记幂等令牌：后续同令牌重试直接命中上面的重放检查。
+	a.uploadTokens.remember(tokenKey(c.GetHeader("X-Upload-Token")), uploadTokenEntry{
+		packageID: pkg.ID, uploaderID: u.ID, name: name,
+	})
+
 	a.audit(c, "package.upload", pkg.Name, "ok", "", fmt.Sprintf("%s %d 字节 sha256=%s", pkg.Kind, pkg.Size, pkg.SHA256), false)
 	ok(c, pkg)
+}
+
+// ---------- 上传幂等登记 ----------
+
+// uploadTokenTTL 幂等令牌有效期：自动重试发生在秒级，1 小时绰绰有余；
+// 过期项在每次查询时惰性清理。
+const uploadTokenTTL = time.Hour
+
+// uploadTokenEntry 令牌对应的已登记安装包。
+type uploadTokenEntry struct {
+	packageID  uint
+	uploaderID uint
+	name       string
+	expiresAt  time.Time
+}
+
+// uploadTokenRegistry 上传幂等登记：token → 已登记的包记录。
+// 状态保存在进程内存即可：重试窗口在秒级，进程重启后前端会重新生成令牌发起新上传。
+type uploadTokenRegistry struct {
+	mu    sync.Mutex
+	items map[string]uploadTokenEntry
+}
+
+func newUploadTokenRegistry() *uploadTokenRegistry {
+	return &uploadTokenRegistry{items: map[string]uploadTokenEntry{}}
+}
+
+// claim 查询令牌：命中、未过期、同一上传者且文件名一致时返回已登记的包。
+func (r *uploadTokenRegistry) claim(token, name string, uploaderID uint) (uploadTokenEntry, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range r.items {
+		if time.Now().After(v.expiresAt) {
+			delete(r.items, k)
+		}
+	}
+	if token == "" || len(token) > 64 {
+		return uploadTokenEntry{}, false
+	}
+	e, ok := r.items[token]
+	if !ok || e.uploaderID != uploaderID || e.name != name || time.Now().After(e.expiresAt) {
+		return uploadTokenEntry{}, false
+	}
+	return e, true
+}
+
+// remember 登记令牌；空令牌与超长令牌忽略。
+func (r *uploadTokenRegistry) remember(token string, e uploadTokenEntry) {
+	if token == "" || len(token) > 64 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e.expiresAt = time.Now().Add(uploadTokenTTL)
+	r.items[token] = e
+}
+
+// tokenKey 归一化幂等令牌：去空白，最多保留 64 字符。
+func tokenKey(raw string) string {
+	return strings.TrimSpace(raw)
 }
 
 // packageQuotaExceeded 判断包仓库当前占用加上本次字节数是否超过配置上限。

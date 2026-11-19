@@ -37,6 +37,9 @@ type App struct {
 	healthCache    healthReport
 	healthAt       time.Time
 	healthCacheFor time.Duration
+
+	// uploadTokens 上传幂等登记：响应丢失后的重试直接返回原记录，不再登记重复包。
+	uploadTokens *uploadTokenRegistry
 }
 
 func NewApp(cfg *config.Config, db *gorm.DB, d deploy.Deployer) *App {
@@ -54,6 +57,8 @@ func NewApp(cfg *config.Config, db *gorm.DB, d deploy.Deployer) *App {
 		dirLocks: map[uint]*sync.Mutex{},
 
 		healthCacheFor: 5 * time.Second,
+
+		uploadTokens: newUploadTokenRegistry(),
 	}
 }
 

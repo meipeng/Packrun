@@ -353,3 +353,99 @@ func TestUploadPayloadEstimate(t *testing.T) {
 }
 
 var _ io.Reader = (*errReader)(nil)
+
+// doUploadWithToken 带幂等令牌的上传请求：模拟客户端响应丢失后的重试。
+func doUploadWithToken(t *testing.T, r http.Handler, filename string, content []byte, bearer, uploadToken string) (*httptest.ResponseRecorder, apiResp) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("构造上传表单失败: %v", err)
+	}
+	if _, err := fw.Write(content); err != nil {
+		t.Fatalf("写入上传内容失败: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("关闭上传表单失败: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/packages", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	if uploadToken != "" {
+		req.Header.Set("X-Upload-Token", uploadToken)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	var resp apiResp
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	return w, resp
+}
+
+// packageFromResp 提取响应中的包记录。
+func packageFromResp(t *testing.T, resp apiResp) model.Package {
+	t.Helper()
+	raw, err := json.Marshal(resp.Data)
+	if err != nil {
+		t.Fatalf("序列化响应数据失败: %v", err)
+	}
+	var pkg model.Package
+	if err := json.Unmarshal(raw, &pkg); err != nil {
+		t.Fatalf("解析包记录失败: %v", err)
+	}
+	return pkg
+}
+
+// 上传幂等（收口手册 §21.4）：响应丢失后客户端携带同一令牌重试，
+// 服务端命中登记直接返回原记录，不再产生重复的包条目。
+func TestUploadIdempotentTokenReplay(t *testing.T) {
+	app, router, db := newSecurityTestEnv(t)
+	alice := mustCreateRoleUser(t, db, "alice", model.RoleDeployer, "*", "active")
+	bearer := mustToken(t, app, alice)
+	content := makeStoredZip(t, "hello.txt", 16)
+
+	first, resp := doUploadWithToken(t, router, "app.zip", content, bearer, "tok-replay-0001")
+	if first.Code != http.StatusOK {
+		t.Fatalf("首次上传应成功，实际 %d / %s", first.Code, resp.Message)
+	}
+	pkg := packageFromResp(t, resp)
+
+	// 同令牌 + 同文件名重试：返回同一条记录
+	retry, respRetry := doUploadWithToken(t, router, "app.zip", content, bearer, "tok-replay-0001")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("幂等重试应成功，实际 %d / %s", retry.Code, respRetry.Message)
+	}
+	if got := packageFromResp(t, respRetry); got.ID != pkg.ID {
+		t.Fatalf("重试应返回原包记录 ID=%d，实际 %d", pkg.ID, got.ID)
+	}
+
+	var n int64
+	db.Model(&model.Package{}).Count(&n)
+	if n != 1 {
+		t.Fatalf("重试后包记录应仍为 1 条，实际 %d 条", n)
+	}
+
+	// 不同文件名的同令牌请求视为全新上传
+	other, _ := doUploadWithToken(t, router, "other.zip", content, bearer, "tok-replay-0001")
+	if other.Code != http.StatusOK {
+		t.Fatalf("不同文件名的上传应按新上传处理，实际 %d", other.Code)
+	}
+	db.Model(&model.Package{}).Count(&n)
+	if n != 2 {
+		t.Fatalf("不同文件名应登记新记录，实际 %d 条", n)
+	}
+
+	// 其他用户携带同一令牌：不命中他人的登记，按新上传处理
+	bob := mustCreateRoleUser(t, db, "bob", model.RoleDeployer, "*", "active")
+	bobBearer := mustToken(t, app, bob)
+	bobRec, _ := doUploadWithToken(t, router, "bob.zip", content, bobBearer, "tok-replay-0001")
+	if bobRec.Code != http.StatusOK {
+		t.Fatalf("其他用户上传应独立成功，实际 %d", bobRec.Code)
+	}
+	db.Model(&model.Package{}).Count(&n)
+	if n != 3 {
+		t.Fatalf("其他用户应登记自己的记录，实际 %d 条", n)
+	}
+}
